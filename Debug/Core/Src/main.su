@@ -1,0 +1,6 @@
+../Core/Src/main.c:87:5:main	16	static
+../Core/Src/main.c:172:6:SystemClock_Config	72	static
+../Core/Src/main.c:213:6:UpdateWaveEffect	24	static
+../Core/Src/main.c:230:6:UpdateDRLMode	24	static
+../Core/Src/main.c:245:6:UpdateStartupBlink	24	static
+../Core/Src/main.c:262:6:Error_Handler	4	static,ignoring_inline_asm
