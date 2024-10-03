@@ -1,0 +1,28 @@
+# Build artifacts
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.out
+
+# Debug files
+*.d
+*.axf
+
+# Intermediate files
+*.dep
+*.lst
+*.bak
+
+# IDE/Toolchain specific files
+*.launch
+.vscode/
+*.workspace
+*.cproject
+*.project
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp

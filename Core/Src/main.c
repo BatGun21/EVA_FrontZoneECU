@@ -36,20 +36,22 @@ typedef enum {
     DRL_MODE,          // Daytime running lights
     TURN_SIGNAL_MODE,  // Turn signal active
     HAZARD_LIGHT_MODE, // Hazard/parking light active
-    STARTUP_BLINK_MODE // Startup blinking mode
+    STARTUP_MODE // Startup blinking mode
 } LED_Mode;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define WS28XX_PIXEL_COUNT 28   // Trial strip with 28 pixels
-#define WAVE_PACKET_SIZE 7      // Number of LEDs in one wave packet
-#define WAVE_SPEED 20           // Delay between each wave step in ms
-#define WAVE_STEP_SIZE 1        // Number of pixels the wave moves per frame
-#define WAVE_PAUSE 100          // Pause between waves
+#define WS28XX_LEFT_LED_COUNT 28   // Left strip on PA8 with 13 LEDs
+#define WS28XX_RIGHT_LED_COUNT 28  // Right strip on PA10 with 13 LEDs
 
-#define STARTUP_BLINK_DELAY 500 // 500ms for blink in startup
-#define DRL_BRIGHTNESS 255      // Full white brightness for DRL
+#define WAVE_PACKET_SIZE 7         // Number of LEDs in one wave packet
+#define WAVE_SPEED 20              // Delay between each wave step in ms
+#define WAVE_STEP_SIZE 1           // Number of pixels the wave moves per frame
+#define WAVE_PAUSE 100             // Pause between waves
+
+#define HAZARD_BLINK_DELAY 500    // 500ms for blink in startup
+#define DRL_BRIGHTNESS 255         // Full white brightness for DRL
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,18 +63,24 @@ typedef enum {
 
 /* USER CODE BEGIN PV */
 WS28XX_HandleTypeDef ws_pa8;    // Left strip (PA8)
+WS28XX_HandleTypeDef ws_pa10;   // Right strip (PA10)
+
 int frame_pa8 = 0;              // Frame counter for wave effect on PA8
-LED_Mode current_mode = DRL_MODE;  // Default mode is DRL
-int startup_state = 0;          // 0 = off, 1 = blinking, 2 = complete
-              // Frame counter for wave effect on PA8
+int frame_pa10 = 0;             // Frame counter for wave effect on PA10
+LED_Mode current_mode_pa8 = STARTUP_MODE;  // Default mode for PA8 is TURN_SIGNAL_MODE
+LED_Mode current_mode_pa10 = STARTUP_MODE; // Default mode for PA10 is TURN_SIGNAL_MODE
+
+int wave_count = 0;             // Wave count for startup sequence
+int drl_wave_complete = 0;  // Variable to track if the DRL wave transition is complete
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame);  // Wave effect function for PA8
-void UpdateDRLMode(WS28XX_HandleTypeDef* ws);                // DRL mode (white light)
-void UpdateStartupBlink(WS28XX_HandleTypeDef* ws, int blink_on);  // Startup blinking mode
+void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count);  // Wave effect function for PA8 and PA10
+void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count);                // DRL mode (white light)
+void UpdateHazardBlink(int led_count);
+void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -112,52 +120,125 @@ int main(void)
   MX_DMA_Init();
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
-  WS28XX_Init(&ws_pa8, &htim1, 36, TIM_CHANNEL_1, WS28XX_PIXEL_COUNT);  // Initialize for PA8
+  WS28XX_Init(&ws_pa8, &htim1, 36, TIM_CHANNEL_1, WS28XX_LEFT_LED_COUNT);   // Initialize for PA8
+  WS28XX_Init(&ws_pa10, &htim1, 36, TIM_CHANNEL_3, WS28XX_RIGHT_LED_COUNT); // Initialize for PA10
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      switch (current_mode)
-      {
-          case TURN_SIGNAL_MODE:
-              // Call the wave effect function for the left strip (PA8) if turn signal is active
-              UpdateWaveEffect(&ws_pa8, frame_pa8);
-              frame_pa8 += WAVE_STEP_SIZE;
-              if (frame_pa8 >= WS28XX_PIXEL_COUNT) frame_pa8 = 0;
-              HAL_Delay(WAVE_SPEED);  // Delay for smooth wave animation
-              break;
+	    // Switch-case for left LED strip (PA8)
+	    switch (current_mode_pa8)
+	    {
+	        case TURN_SIGNAL_MODE:
+	            // Call the wave effect for the left strip (PA8)
+	            UpdateWaveEffect(&ws_pa8, frame_pa8, WS28XX_LEFT_LED_COUNT);
+	            frame_pa8 += WAVE_STEP_SIZE;
+	            if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) frame_pa8 = 0;
+	            HAL_Delay(WAVE_SPEED);
+	            break;
 
-          case HAZARD_LIGHT_MODE:
-              // Wave pattern if parking/hazard lights are on
-              UpdateWaveEffect(&ws_pa8, frame_pa8);
-              frame_pa8 += WAVE_STEP_SIZE;
-              if (frame_pa8 >= WS28XX_PIXEL_COUNT) frame_pa8 = 0;
-              HAL_Delay(WAVE_SPEED);
-              break;
+	        case HAZARD_LIGHT_MODE:
+	            // Call the blink effect for both strips in sync (hazard lights)
+	            UpdateHazardBlink(WS28XX_LEFT_LED_COUNT);  // Blink left strip (PA8)
+	            HAL_Delay(HAZARD_BLINK_DELAY);  // Delay for the blink effect
+	            break;
 
-          case STARTUP_BLINK_MODE:
-              // Run startup sequence (blinking in amber)
-              UpdateStartupBlink(&ws_pa8, 1);  // Blink on
-              HAL_Delay(STARTUP_BLINK_DELAY);
-              UpdateStartupBlink(&ws_pa8, 0);  // Blink off
-              HAL_Delay(STARTUP_BLINK_DELAY);
-              // Continue startup sequence for a few cycles (e.g., 5 blinks)
-              startup_state++;  // Move to next state after blinking
-              if (startup_state >= 5) {
-                  current_mode = DRL_MODE;  // Switch to DRL after startup
-              }
-              break;
+	        case STARTUP_MODE:
+	            if (wave_count < 5) {
+	                // First, run the Amber wave effect for 5 cycles
+	                UpdateWaveEffect(&ws_pa8, frame_pa8, WS28XX_LEFT_LED_COUNT);  // Amber wave on left strip
+	                UpdateWaveEffect(&ws_pa10, frame_pa10, WS28XX_RIGHT_LED_COUNT);  // Amber wave on right strip
+	                frame_pa8 += WAVE_STEP_SIZE;
+	                frame_pa10 += WAVE_STEP_SIZE;
 
-          case DRL_MODE:
-          default:
-              // Default to DRL mode if no signals are active and startup is complete
-              UpdateDRLMode(&ws_pa8);
-              break;
-      }
+	                if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) {
+	                    frame_pa8 = 0;
+	                    frame_pa10 = 0;
+	                    wave_count++;  // Increment wave count after each full cycle
+	                }
+	                HAL_Delay(WAVE_SPEED);
+	            } else if (!drl_wave_complete) {
+	                // Transition to DRL with a wave-like effect
+	                for (int i = 0; i <= frame_pa8; i++) {
+	                    WS28XX_SetPixel_RGBW_565(&ws_pa8, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // Light up DRL white on left strip
+	                    WS28XX_SetPixel_RGBW_565(&ws_pa10, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS); // Light up DRL white on right strip
+	                }
+	                WS28XX_Update(&ws_pa8);
+	                WS28XX_Update(&ws_pa10);
+
+	                frame_pa8 += WAVE_STEP_SIZE;
+	                frame_pa10 += WAVE_STEP_SIZE;
+
+	                // Once the entire strip is lit, set DRL as complete
+	                if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) {
+	                    drl_wave_complete = 1;  // Mark the DRL transition as complete
+	                }
+	                HAL_Delay(WAVE_SPEED);
+	            } else {
+	                // Switch to full DRL mode once the transition is complete
+	                current_mode_pa8 = DRL_MODE;
+	                current_mode_pa10 = DRL_MODE;
+	                wave_count = 0;  // Reset wave count for future use
+	                drl_wave_complete = 0;  // Reset DRL wave completion flag
+	            }
+	            break;
 
 
+
+	        case DRL_MODE:
+	        default:
+	        {
+	            // Avoid constant updates for DRL mode; refresh periodically
+	            static int drl_last_update_time = 0;
+	            int drl_current_time = HAL_GetTick();
+
+	            // Update only if more than 100ms has passed
+	            if (drl_current_time - drl_last_update_time >= 10000) {
+	                UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT);  // Left strip DRL update
+	                UpdateDRLMode(&ws_pa10, WS28XX_RIGHT_LED_COUNT); // Right strip DRL update
+	                drl_last_update_time = drl_current_time;  // Update last refresh time
+	            }
+	            break;
+	        }
+	    }
+
+	    // Switch-case for right LED strip (PA10)
+	    switch (current_mode_pa10)
+	    {
+	        case TURN_SIGNAL_MODE:
+	            // Call the wave effect for the right strip (PA10)
+	            UpdateWaveEffect(&ws_pa10, frame_pa10, WS28XX_RIGHT_LED_COUNT);
+	            frame_pa10 += WAVE_STEP_SIZE;
+	            if (frame_pa10 >= WS28XX_RIGHT_LED_COUNT) frame_pa10 = 0;
+	            HAL_Delay(WAVE_SPEED);
+	            break;
+
+	        case HAZARD_LIGHT_MODE:
+	            // Already handled in the PA8 case to ensure synchronization
+	            break;
+
+	        case STARTUP_MODE:
+	            // Already handled in the PA8 case for synchronized wave effect
+	            break;
+
+	        case DRL_MODE:
+	        default:
+	        {
+	            // Avoid constant updates for DRL mode; refresh periodically
+	            static int drl_last_update_time = 0;
+	            int drl_current_time = HAL_GetTick();
+
+	            // Update only if more than 100ms has passed
+	            if (drl_current_time - drl_last_update_time >= 10000) {
+	                UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT);  // Left strip DRL update
+	                UpdateDRLMode(&ws_pa10, WS28XX_RIGHT_LED_COUNT); // Right strip DRL update
+	                drl_last_update_time = drl_current_time;  // Update last refresh time
+	            }
+	            break;
+	        }
+	    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -205,16 +286,19 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 /**
-  * @brief Update the PA8 LED strip with a wave effect (turn signal / hazard light)
+  * @brief Update the LED strip with a wave effect (turn signal / hazard light)
   * @param ws: Pointer to the WS28XX handle
   * @param frame: Current frame number for the wave effect
+  * @param pixel_count: Number of pixels in the strip
   * @retval None
   */
-void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame)
+void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
 {
-    for (int i = 0; i < WS28XX_PIXEL_COUNT; i++) {
+    ResetLEDStrip(ws, pixel_count);  // Ensure all LEDs are reset to black before updating
+
+    for (int i = 0; i < pixel_count; i++) {
         if (i >= frame && i < frame + WAVE_PACKET_SIZE) {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_AMBER, 255);  // Use Amber color
+            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_AMBER, 255);  // Amber color
         } else {
             WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_BLACK, 0);    // Turn off (black)
         }
@@ -223,36 +307,68 @@ void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame)
 }
 
 /**
-  * @brief Update the PA8 LED strip in DRL mode (100% white brightness)
+  * @brief Update the LED strip in DRL mode (100% white brightness)
   * @param ws: Pointer to the WS28XX handle
+  * @param pixel_count: Number of pixels in the strip
   * @retval None
   */
-void UpdateDRLMode(WS28XX_HandleTypeDef* ws)
+void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count)
 {
-    for (int i = 0; i < WS28XX_PIXEL_COUNT; i++) {
-//        WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // Full white light
-        WS28XX_SetPixel_RGB_565(ws,  i,  COLOR_RGB565_WHITE);
+    static int last_update_time = 0;
+    int current_time = HAL_GetTick();  // Get the current system time in milliseconds
+
+    // Update only every 50ms to avoid flickering
+    if (current_time - last_update_time >= 50) {
+        ResetLEDStrip(ws, pixel_count);  // Ensure no residual data on the strip
+
+        for (int i = 0; i < pixel_count; i++) {
+            WS28XX_SetPixel_RGB_565(ws, i, COLOR_RGB565_WHITE);  // Full white light
+        }
+        WS28XX_Update(ws);  // Refresh the LED strip
+
+        last_update_time = current_time;  // Update the last time we refreshed
     }
-    WS28XX_Update(ws);  // Refresh the LED strip
+}
+
+
+/**
+  * @brief Blink both LED strips for hazard mode
+  * @param led_count: Number of LEDs in each strip
+  * @retval None
+  */
+void UpdateHazardBlink(int led_count)
+{
+    static int blink_on = 0;  // Track blink state (on/off)
+
+    for (int i = 0; i < led_count; i++) {
+        if (blink_on) {
+            WS28XX_SetPixel_RGBW_565(&ws_pa8, i, COLOR_RGB565_AMBER, 255);  // Amber on for left strip
+            WS28XX_SetPixel_RGBW_565(&ws_pa10, i, COLOR_RGB565_AMBER, 255); // Amber on for right strip
+        } else {
+            WS28XX_SetPixel_RGBW_565(&ws_pa8, i, COLOR_RGB565_BLACK, 0);    // Off for left strip
+            WS28XX_SetPixel_RGBW_565(&ws_pa10, i, COLOR_RGB565_BLACK, 0);   // Off for right strip
+        }
+    }
+
+    blink_on = !blink_on;  // Toggle the blink state
+    WS28XX_Update(&ws_pa8);  // Refresh left strip
+    WS28XX_Update(&ws_pa10); // Refresh right strip
 }
 
 /**
-  * @brief Update the PA8 LED strip with a blinking pattern for startup (amber)
+  * @brief Reset all LEDs in the strip to black before updating
   * @param ws: Pointer to the WS28XX handle
-  * @param blink_on: 1 to blink on, 0 to blink off
+  * @param pixel_count: Number of pixels in the strip
   * @retval None
   */
-void UpdateStartupBlink(WS28XX_HandleTypeDef* ws, int blink_on)
+void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count)
 {
-    for (int i = 0; i < WS28XX_PIXEL_COUNT; i++) {
-        if (blink_on) {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_AMBER, 255);  // Amber blinking on
-        } else {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_BLACK, 0);  // LEDs off for blink off
-        }
+    for (int i = 0; i < pixel_count; i++) {
+        WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_BLACK, 0);  // Turn off all LEDs
     }
-    WS28XX_Update(ws);  // Refresh the LED strip
+    WS28XX_Update(ws);  // Refresh the strip
 }
+
 /* USER CODE END 4 */
 
 /**
