@@ -1,7 +1,9 @@
-../Core/Src/main.c:95:5:main	18
-../Core/Src/main.c:253:6:SystemClock_Config	3
-../Core/Src/main.c:295:6:UpdateWaveEffect	4
-../Core/Src/main.c:315:6:UpdateDRLMode	3
-../Core/Src/main.c:339:6:UpdateHazardBlink	3
-../Core/Src/main.c:364:6:ResetLEDStrip	2
-../Core/Src/main.c:378:6:Error_Handler	1
+../Core/Src/main.c:106:5:main	20
+../Core/Src/main.c:262:6:SystemClock_Config	3
+../Core/Src/main.c:298:6:UpdateWaveEffect	4
+../Core/Src/main.c:310:6:UpdateDRLMode	2
+../Core/Src/main.c:318:6:UpdateHazardBlink	3
+../Core/Src/main.c:334:6:ResetLEDStrip	2
+../Core/Src/main.c:341:6:UpdateStartupWaveForMiddle	8
+../Core/Src/main.c:374:6:UpdateSOCIndication	6
+../Core/Src/main.c:395:6:Error_Handler	1
