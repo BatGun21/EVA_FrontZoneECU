@@ -5,6 +5,10 @@
 *.map
 *.o
 *.out
+*.list
+*.su
+*.cyclo
+
 
 # Debug files
 *.d
