@@ -58,10 +58,10 @@ typedef enum {
 #define WS28XX_MIDDLE_LED_COUNT 144
 #define WS28XX_RIGHT_LED_COUNT 37
 
-#define WAVE_PACKET_SIZE 3
+#define WAVE_PACKET_SIZE 8
 #define WAVE_SPEED 1
-#define WAVE_STEP_SIZE 3
-#define WAVE_PAUSE 500
+#define WAVE_STEP_SIZE 4
+#define WAVE_PAUSE 10
 
 #define HAZARD_BLINK_DELAY 500
 #define DRL_BRIGHTNESS 155
@@ -114,7 +114,7 @@ int soc_percentage = 40;  // Example value
 
 // Control signals
 int charging_signal_received = 0, drl_signal_received = 0, hazard_signal_received = 0;
-int turn_signal_left_received = 1, turn_signal_right_received = 0;
+int turn_signal_left_received = 0, turn_signal_right_received = 0;
 int horn_signal_received = 0, headlamp_low_beam_signal_received = 0, headlamp_high_beam_signal_received = 0;
 
 #ifdef TEST_MODE
@@ -357,6 +357,7 @@ void HandleLeftStripState(void)
             UpdateWaveEffect(&ws_pa8, frame_pa8, WS28XX_LEFT_LED_COUNT);
             frame_pa8 += WAVE_STEP_SIZE;
             if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) frame_pa8 = 0;
+            HAL_Delay(WAVE_PAUSE);
             is_drl_displayed_pa8 = 0;  // Reset DRL flag
             break;
 
@@ -373,6 +374,7 @@ void HandleLeftStripState(void)
                     frame_pa8 = 0;  // Restart the wave from the beginning
                 }
                 is_drl_displayed_pa8 = 0;  // Reset DRL flag
+                HAL_Delay(WAVE_PAUSE);
             } else {
                 // Transition to DRL mode when middle strip completes its sequential turn-on
                 UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT, &is_drl_displayed_pa8);
@@ -423,6 +425,7 @@ void HandleRightStripState(void)
             frame_pa10 += WAVE_STEP_SIZE;
             if (frame_pa10 >= WS28XX_RIGHT_LED_COUNT) frame_pa10 = 0;
             is_drl_displayed_pa10 = 0;  // Reset DRL flag
+            HAL_Delay(WAVE_PAUSE);
             break;
 
         case DRL_MODE:
@@ -468,7 +471,6 @@ void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
         }
     }
     WS28XX_Update(ws);
-    HAL_Delay(5);
 }
 
 void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displayed)
