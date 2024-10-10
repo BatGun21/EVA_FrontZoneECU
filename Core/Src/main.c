@@ -54,26 +54,26 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define WS28XX_LEFT_LED_COUNT 13
-#define WS28XX_MIDDLE_LED_COUNT 15
-#define WS28XX_RIGHT_LED_COUNT 13
+#define WS28XX_LEFT_LED_COUNT 37
+#define WS28XX_MIDDLE_LED_COUNT 144
+#define WS28XX_RIGHT_LED_COUNT 37
 
-#define WAVE_PACKET_SIZE 5
-#define WAVE_SPEED 20
-#define WAVE_STEP_SIZE 1
+#define WAVE_PACKET_SIZE 7
+#define WAVE_SPEED 1
+#define WAVE_STEP_SIZE 3
 #define WAVE_PAUSE 100
 
 #define HAZARD_BLINK_DELAY 500
 #define DRL_BRIGHTNESS 155
 
-#define WAVE_PACKET_SIZE_MIDDLE 1
+#define WAVE_PACKET_SIZE_MIDDLE 10
 #define MIDDLE_LED_MID_INDEX (WS28XX_MIDDLE_LED_COUNT / 2)
 #define CHARGING_COLOR_AC 0x07FF
 #define CHARGING_COLOR_DC 0x2444
 
 #define AC_CHARGING 1
 #define DC_CHARGING 2
-
+// Define Test_Mode to run in the test mode, this tests if the software is able to run the hardware in different states.
 #define TEST_MODE 1
 
 // Define TEST_MODE for testing state machines
@@ -104,9 +104,9 @@ int wave_count = 0;
 int drl_wave_complete = 0;
 int soc_percentage = 40;
 
-int charging_signal_received = 0, drl_signal_received = 1, hazard_signal_received = 0;
+int charging_signal_received = 0, drl_signal_received = 0, hazard_signal_received = 0;
 int turn_signal_left_received = 0, turn_signal_right_received = 0;
-int horn_signal_received = 0, headlamp_low_beam_signal_received = 1, headlamp_high_beam_signal_received = 0;
+int horn_signal_received = 0, headlamp_low_beam_signal_received = 0, headlamp_high_beam_signal_received = 0;
 
 #ifdef TEST_MODE
 /* Variables for Test Mode */
@@ -137,10 +137,13 @@ void HandleLeftStripState(void);
 void HandleRightStripState(void);
 void HandleHornState(void);
 void HandleHeadlampState(void);
-void SetGPIOHigh(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);  // Helper function to set GPIO High (turn relay off)
-void SetGPIOLow(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);   // Helper function to set GPIO Low (turn relay on)
+void SetGPIOHigh(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);
+void SetGPIOLow(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);
 void GPIO_Init_PA0_PA1_PA6(void);
+#ifdef TEST_MODE
 void Handle_TestMode(void);
+#endif
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -443,9 +446,6 @@ void HandleRightStripState(void)
   */
 void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
 {
-    ResetLEDStrip(ws, pixel_count);  // Ensure all LEDs are reset to black before updating
-
-void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count) {
     ResetLEDStrip(ws, pixel_count);
     for (int i = 0; i < pixel_count; i++) {
         if (i >= frame && i < frame + WAVE_PACKET_SIZE) {
@@ -501,62 +501,13 @@ void UpdateHazardBlink(int led_count)
         }
     }
     blink_on = !blink_on;
-    WS28XX_Update(ws_pa8);
-    WS28XX_Update(ws_pa10);
+    WS28XX_Update(&ws_pa8);
+    WS28XX_Update(&ws_pa10);
 }
 
 void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count) {
     for (int i = 0; i < pixel_count; i++) {
         WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_BLACK, 0);
-    }
-    WS28XX_Update(ws);
-}
-
-void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws) {
-    static int wave_count_middle = 0;
-    static int frame_left = MIDDLE_LED_MID_INDEX;
-    static int frame_right = MIDDLE_LED_MID_INDEX;
-
-    if (wave_count_middle < 2) {
-        for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
-            if (frame_left - i >= 0) {
-                WS28XX_SetPixel_RGBW_565(ws, frame_left - i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
-            }
-            if (frame_right + i < WS28XX_MIDDLE_LED_COUNT) {
-                WS28XX_SetPixel_RGBW_565(ws, frame_right + i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
-            }
-        }
-        WS28XX_Update(ws);
-        frame_left--;
-        frame_right++;
-
-        if (frame_left < 0 && frame_right >= WS28XX_MIDDLE_LED_COUNT) {
-            frame_left = MIDDLE_LED_MID_INDEX;
-            frame_right = MIDDLE_LED_MID_INDEX;
-            wave_count_middle++;
-        }
-    } else {
-        for (int i = 0; i < WS28XX_MIDDLE_LED_COUNT; i++) {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
-        }
-        WS28XX_Update(ws);
-        current_mode_pa9 = DRL_MODE;
-        wave_count_middle = 0;
-    }
-}
-
-void UpdateSOCIndication(WS28XX_HandleTypeDef* ws, int soc_percentage, int charging_type) {
-    int led_count_to_light = (WS28XX_MIDDLE_LED_COUNT * soc_percentage) / 100;
-    int left_led = MIDDLE_LED_MID_INDEX;
-    int right_led = MIDDLE_LED_MID_INDEX;
-
-    for (int i = 0; i < led_count_to_light / 2; i++) {
-        if (left_led - i >= 0) {
-            WS28XX_SetPixel_RGBW_565(ws, left_led - i, (charging_type == AC_CHARGING) ? CHARGING_COLOR_AC : CHARGING_COLOR_DC, DRL_BRIGHTNESS);
-        }
-        if (right_led + i < WS28XX_MIDDLE_LED_COUNT) {
-            WS28XX_SetPixel_RGBW_565(ws, right_led + i, (charging_type == AC_CHARGING) ? CHARGING_COLOR_AC : CHARGING_COLOR_DC, DRL_BRIGHTNESS);
-        }
     }
     WS28XX_Update(ws);
 }
@@ -569,7 +520,7 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
     static uint8_t wave_direction = 0;  // 0 for outward, 1 for inward
     static int drl_wave_complete_middle = 0;  // Variable to track DRL transition
 
-    if (wave_count_middle < 4) {
+    if (wave_count_middle < 3) {
         // We want 2 full passes (each pass consists of outward and inward wave)
         ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Turn off LEDs to create wave movement effect
 
@@ -613,7 +564,7 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
             }
         }
 
-        HAL_Delay(WAVE_SPEED * 2);  // Slower speed for a luxury aesthetic
+        HAL_Delay(WAVE_SPEED);  // Slower speed for a luxury aesthetic
 
     } else if (!drl_wave_complete_middle) {
         // Transition to DRL mode with a wave-like effect after two full wave passes
@@ -637,7 +588,7 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
         }
         WS28XX_Update(ws);
 
-        current_mode_pa9 = DRL_MODE;  // Switch to DRL mode
+        drl_signal_received = 1;
         wave_count_middle = 0;  // Reset wave count for future use
         drl_wave_complete_middle = 0;  // Reset DRL wave completion flag
     }
@@ -752,7 +703,7 @@ void HandleHeadlampState(void)
             break;
     }
 }
-
+#ifdef TEST_MODE
 /**
   * @brief Handle Test Mode Function to toggle states every 10 seconds.
   */
@@ -826,6 +777,7 @@ void Handle_TestMode(void)
         last_time_headlamp = current_time;
     }
 }
+#endif
 /* USER CODE END 4 */
 /**
   * @brief  This function is executed in case of error occurrence.
