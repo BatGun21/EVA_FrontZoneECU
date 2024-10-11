@@ -58,15 +58,16 @@ typedef enum {
 #define WS28XX_MIDDLE_LED_COUNT 144
 #define WS28XX_RIGHT_LED_COUNT 37
 
-#define WAVE_PACKET_SIZE 8
-#define WAVE_SPEED 1
-#define WAVE_STEP_SIZE 4
+#define WAVE_PACKET_SIZE 7
+#define WAVE_SPEED 5 // Increase number to reduce speed
+#define WAVE_STEP_SIZE 1
 #define WAVE_PAUSE 10
 
 #define HAZARD_BLINK_DELAY 500
 #define DRL_BRIGHTNESS 155
 
-#define WAVE_PACKET_SIZE_MIDDLE 10
+#define WAVE_PACKET_SIZE_MIDDLE 4
+#define STARTUP_WAVE_SPEED 1 // Increase number to reduce speed
 #define MIDDLE_LED_MID_INDEX (WS28XX_MIDDLE_LED_COUNT / 2)
 #define CHARGING_COLOR_AC 0x07FF
 #define CHARGING_COLOR_DC 0x2444
@@ -74,7 +75,7 @@ typedef enum {
 #define AC_CHARGING 1
 #define DC_CHARGING 2
 // Define Test_Mode to run in the test mode, this tests if the software is able to run the hardware in different states.
-//#define TEST_MODE 1
+#define TEST_MODE 1
 #ifdef TEST_MODE
 #define TOGGLE_INTERVAL 10000         // 10 seconds for state transitions
 #define HORN_ON_DURATION 300          // Horn should be on for 300 ms
@@ -114,7 +115,7 @@ int soc_percentage = 40;  // Example value
 
 // Control signals
 int charging_signal_received = 0, drl_signal_received = 0, hazard_signal_received = 0;
-int turn_signal_left_received = 0, turn_signal_right_received = 0;
+int turn_signal_left_received = 1, turn_signal_right_received = 0;
 int horn_signal_received = 0, headlamp_low_beam_signal_received = 0, headlamp_high_beam_signal_received = 0;
 
 #ifdef TEST_MODE
@@ -321,11 +322,13 @@ void HandleMiddleStripState(void)
 
 void HandleLeftStripState(void)
 {
+    // Priority management for left strip
     if (charging_signal_received) {
+        // Check for hazard mode during charging mode
         if (hazard_signal_received) {
             current_mode_pa8 = HAZARD_LIGHT_MODE;
         } else {
-            current_mode_pa8 = CHARGING_MODE;
+            current_mode_pa8 = CHARGING_MODE;  // Side strips off in charging mode unless hazard is active
         }
     }
     else if (hazard_signal_received) {
@@ -344,12 +347,14 @@ void HandleLeftStripState(void)
     // State machine for left strip (PA8)
     switch (current_mode_pa8) {
         case CHARGING_MODE:
-            ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);
+            ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);  // Turn off left strip in charging mode
             is_drl_displayed_pa8 = 0;  // Reset DRL flag
             break;
 
         case HAZARD_LIGHT_MODE:
+            frame_pa8 = 0;
             UpdateHazardBlink(WS28XX_LEFT_LED_COUNT);
+            HAL_Delay(HAZARD_BLINK_DELAY);
             is_drl_displayed_pa8 = 0;  // Reset DRL flag
             break;
 
@@ -357,42 +362,44 @@ void HandleLeftStripState(void)
             UpdateWaveEffect(&ws_pa8, frame_pa8, WS28XX_LEFT_LED_COUNT);
             frame_pa8 += WAVE_STEP_SIZE;
             if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) frame_pa8 = 0;
-            HAL_Delay(WAVE_PAUSE);
+            HAL_Delay(WAVE_SPEED);
             is_drl_displayed_pa8 = 0;  // Reset DRL flag
             break;
 
         case DRL_MODE:
-            UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT, &is_drl_displayed_pa8);  // Use PA8-specific DRL flag
+            frame_pa8 = 0;
+            UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT, &is_drl_displayed_pa8);
             break;
 
         case STARTUP_MODE:
-            // Generate repeating amber waves until middle strip sequential light-up is complete
-            if (!drl_wave_complete_middle) {
+        	if(!drl_wave_complete_middle)
+        	{
                 UpdateWaveEffect(&ws_pa8, frame_pa8, WS28XX_LEFT_LED_COUNT);
                 frame_pa8 += WAVE_STEP_SIZE;
-                if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) {
-                    frame_pa8 = 0;  // Restart the wave from the beginning
-                }
+                if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) frame_pa8 = 0;
+                HAL_Delay(WAVE_SPEED);
                 is_drl_displayed_pa8 = 0;  // Reset DRL flag
-                HAL_Delay(WAVE_PAUSE);
-            } else {
-                // Transition to DRL mode when middle strip completes its sequential turn-on
-                UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT, &is_drl_displayed_pa8);
-            }
+        	}else
+        	{
+        		current_mode_pa8 = DRL_MODE;
+        	}
             break;
 
         default:
+            current_mode_pa8 = DRL_MODE;
             break;
     }
 }
 
 void HandleRightStripState(void)
 {
+    // Priority management for right strip
     if (charging_signal_received) {
+        // Check for hazard mode during charging mode
         if (hazard_signal_received) {
             current_mode_pa10 = HAZARD_LIGHT_MODE;
         } else {
-            current_mode_pa10 = CHARGING_MODE;
+            current_mode_pa10 = CHARGING_MODE;  // Side strips off in charging mode unless hazard is active
         }
     }
     else if (hazard_signal_received) {
@@ -411,55 +418,50 @@ void HandleRightStripState(void)
     // State machine for right strip (PA10)
     switch (current_mode_pa10) {
         case CHARGING_MODE:
-            ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);
+            ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);  // Turn off right strip in charging mode
             is_drl_displayed_pa10 = 0;  // Reset DRL flag
             break;
 
         case HAZARD_LIGHT_MODE:
+            frame_pa10 = 0;
             UpdateHazardBlink(WS28XX_RIGHT_LED_COUNT);
-            is_drl_displayed_pa10 = 0;  // Reset DRL flag
+            HAL_Delay(HAZARD_BLINK_DELAY);
+            is_drl_displayed_pa10 = 0;
             break;
 
         case TURN_SIGNAL_MODE:
             UpdateWaveEffect(&ws_pa10, frame_pa10, WS28XX_RIGHT_LED_COUNT);
             frame_pa10 += WAVE_STEP_SIZE;
             if (frame_pa10 >= WS28XX_RIGHT_LED_COUNT) frame_pa10 = 0;
-            is_drl_displayed_pa10 = 0;  // Reset DRL flag
-            HAL_Delay(WAVE_PAUSE);
+            HAL_Delay(WAVE_SPEED);
+            is_drl_displayed_pa10 = 0;
             break;
 
         case DRL_MODE:
-            UpdateDRLMode(&ws_pa10, WS28XX_RIGHT_LED_COUNT, &is_drl_displayed_pa10);  // Use PA10-specific DRL flag
+            frame_pa10 = 0;
+            UpdateDRLMode(&ws_pa10, WS28XX_RIGHT_LED_COUNT, &is_drl_displayed_pa10);
             break;
 
         case STARTUP_MODE:
-            // Generate repeating amber waves until middle strip sequential light-up is complete
-            if (!drl_wave_complete_middle) {
+        	if(!drl_wave_complete_middle)
+        	{
                 UpdateWaveEffect(&ws_pa10, frame_pa10, WS28XX_RIGHT_LED_COUNT);
                 frame_pa10 += WAVE_STEP_SIZE;
-                if (frame_pa10 >= WS28XX_RIGHT_LED_COUNT) {
-                    frame_pa10 = 0;  // Restart the wave from the beginning
-                }
-                is_drl_displayed_pa10 = 0;  // Reset DRL flag
-            } else {
-                // Transition to DRL mode when middle strip completes its sequential turn-on
-                UpdateDRLMode(&ws_pa10, WS28XX_RIGHT_LED_COUNT, &is_drl_displayed_pa10);
-            }
+                if (frame_pa10 >= WS28XX_RIGHT_LED_COUNT) frame_pa10 = 0;
+                HAL_Delay(WAVE_SPEED);
+                is_drl_displayed_pa10 = 0;
+        	}else
+        	{
+        		current_mode_pa10 = DRL_MODE;
+        	}
             break;
 
         default:
+            current_mode_pa10 = DRL_MODE;
             break;
     }
 }
 
-
-/**
-  * @brief Update the LED strip with a wave effect (turn signal))
-  * @param ws: Pointer to the WS28XX handle
-  * @param frame: Current frame number for the wave effect
-  * @param pixel_count: Number of pixels in the strip
-  * @retval None
-  */
 void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
 {
     ResetLEDStrip(ws, pixel_count);
@@ -493,12 +495,6 @@ void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displa
     *is_drl_displayed = 1;
 }
 
-
-/**
-  * @brief Blink both LED strips for hazard mode
-  * @param led_count: Number of LEDs in each strip
-  * @retval None
-  */
 void UpdateHazardBlink(int led_count)
 {
     static int blink_on = 0;  // Track blink state (on/off)
@@ -526,27 +522,27 @@ void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count) {
 
 void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
 {
-    static int wave_count_middle = 0;
-    static int frame_left = MIDDLE_LED_MID_INDEX;  // Start from the center
-    static int frame_right = MIDDLE_LED_MID_INDEX;
-    static uint8_t wave_direction = 0;  // 0 = outward, 1 = inward
-    static int last_update_time = 0;    // To control update speed
-    static int drl_wave_complete_middle = 0;
-    static int sequential_turn_on = 0;  // For sequential turn-on after two passes
-    int current_time = HAL_GetTick();
+    static int wave_count_middle = 0;               // To track the number of outward-inward wave passes
+    static int frame_left = MIDDLE_LED_MID_INDEX;   // Start from the middle (left side)
+    static int frame_right = MIDDLE_LED_MID_INDEX;  // Start from the middle (right side)
+    static uint8_t wave_direction = 0;              // 0 = outward, 1 = inward
+    static int last_update_time = 0;                // To control update speed and reduce flickering
+    static int drl_wave_complete_middle = 0;        // To indicate when DRL transition is complete
+    static int sequential_turn_on = 0;              // Counter for sequential turn-on after waves
+    int current_time = HAL_GetTick();               // Get the current system time in milliseconds
 
-    // First phase: Two passes (outward and inward)
+    // Phase 1: Wave Animation (Two full passes: outward and inward)
     if (wave_count_middle < 2) {
-        if (current_time - last_update_time >= WAVE_SPEED * 10) {
-            // Outward wave movement
+        if (current_time - last_update_time >= STARTUP_WAVE_SPEED) {
+            // Outward wave animation
             if (wave_direction == 0) {
-                ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs
+                ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs for next wave update
                 for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
                     if (frame_left - i >= 0) {
-                        WS28XX_SetPixel_RGBW_565(ws, frame_left - i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
+                        WS28XX_SetPixel_RGB_888(ws, frame_left - i, 0xFFFFFF);  // Set white color with RGB 888
                     }
                     if (frame_right + i < WS28XX_MIDDLE_LED_COUNT) {
-                        WS28XX_SetPixel_RGBW_565(ws, frame_right + i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
+                        WS28XX_SetPixel_RGB_888(ws, frame_right + i, 0xFFFFFF);  // Set white color with RGB 888
                     }
                 }
                 WS28XX_Update(ws);
@@ -558,15 +554,15 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
                     wave_direction = 1;  // Switch to inward direction
                 }
             }
-            // Inward wave movement
+            // Inward wave animation
             else if (wave_direction == 1) {
-                ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs
+                ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs for the next update
                 for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
                     if (frame_left + i < MIDDLE_LED_MID_INDEX) {
-                        WS28XX_SetPixel_RGBW_565(ws, frame_left + i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
+                        WS28XX_SetPixel_RGB_888(ws, frame_left + i, 0xFFFFFF);  // Set white color
                     }
                     if (frame_right - i >= MIDDLE_LED_MID_INDEX) {
-                        WS28XX_SetPixel_RGBW_565(ws, frame_right - i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
+                        WS28XX_SetPixel_RGB_888(ws, frame_right - i, 0xFFFFFF);  // Set white color
                     }
                 }
                 WS28XX_Update(ws);
@@ -577,44 +573,45 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
                 if (frame_left >= MIDDLE_LED_MID_INDEX && frame_right <= MIDDLE_LED_MID_INDEX) {
                     frame_left = MIDDLE_LED_MID_INDEX;
                     frame_right = MIDDLE_LED_MID_INDEX;
-                    wave_direction = 0;  // Switch back to outward
+                    wave_direction = 0;  // Reset to outward
                     wave_count_middle++;  // Increment pass count
                 }
             }
-            last_update_time = current_time;  // Update time for the next wave step
+            last_update_time = current_time;  // Update time for next wave step
         }
 
-    // Second phase: Sequential turn-on from middle to edges
+    // Phase 2: Sequential Turn-On after Two Passes
     } else if (!drl_wave_complete_middle) {
-        if (current_time - last_update_time >= WAVE_SPEED * 20) {  // Slightly slower speed for sequential effect
-            // Light up from center to edges
-            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX - sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
-            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX + sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
+        if (current_time - last_update_time >= STARTUP_WAVE_SPEED * 2) {  // Slower speed for smooth sequential effect
+            // Light up LEDs sequentially from center to edges
+            WS28XX_SetPixel_RGB_888(ws, MIDDLE_LED_MID_INDEX - sequential_turn_on, 0xFFFFFF);  // White
+            WS28XX_SetPixel_RGB_888(ws, MIDDLE_LED_MID_INDEX + sequential_turn_on, 0xFFFFFF);  // White
 
             WS28XX_Update(ws);
             sequential_turn_on++;
 
-            // Check if we've turned on all LEDs
+            // Check if all LEDs have been turned on
             if (sequential_turn_on >= MIDDLE_LED_MID_INDEX) {
-                drl_wave_complete_middle = 1;  // Mark transition complete
+                drl_wave_complete_middle = 1;  // Mark sequential turn-on complete
             }
-            last_update_time = current_time;  // Update time for the next step
+            last_update_time = current_time;  // Update time for next step
         }
 
-    // Third phase: Transition to DRL mode (steady white light)
+    // Phase 3: Transition to Steady DRL Mode (All LEDs white)
     } else {
-        // Set all LEDs to DRL mode
+        // Set all LEDs to DRL mode (steady white)
         for (int i = 0; i < WS28XX_MIDDLE_LED_COUNT; i++) {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // Full DRL brightness
+            WS28XX_SetPixel_RGB_888(ws, i, 0xFFFFFF);  // Full brightness in DRL mode
         }
         WS28XX_Update(ws);
 
         drl_signal_received = 1;  // Signal that DRL mode is active
-        wave_count_middle = 0;    // Reset wave count for future startup sequences
-        drl_wave_complete_middle = 0;
+        wave_count_middle = 0;    // Reset wave count for future sequences
+        drl_wave_complete_middle = 0;  // Reset DRL completion flag
         sequential_turn_on = 0;   // Reset sequential turn-on counter
     }
 }
+
 
 void UpdateSOCIndication(WS28XX_HandleTypeDef* ws, int soc_percentage, int charging_type)
 {
