@@ -142,7 +142,7 @@ bool  WS28XX_SetPixel_RGB_565(WS28XX_HandleTypeDef *Handle, uint16_t Pixel, uint
 bool  WS28XX_SetPixel_RGB_888(WS28XX_HandleTypeDef *Handle, uint16_t Pixel, uint32_t Color);
 bool  WS28XX_SetPixel_RGBW_565(WS28XX_HandleTypeDef *Handle, uint16_t Pixel, uint16_t Color, uint8_t Brightness);
 bool  WS28XX_SetPixel_RGBW_888(WS28XX_HandleTypeDef *Handle, uint16_t Pixel, uint32_t Color, uint8_t Brightness);
-bool WS28XX_Update(WS28XX_HandleTypeDef *Handle);
+bool  WS28XX_Update(WS28XX_HandleTypeDef *Handle);
 
 #ifdef __cplusplus
 }

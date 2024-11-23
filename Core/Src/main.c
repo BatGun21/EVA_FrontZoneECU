@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "dma.h"
 #include "tim.h"
 #include "gpio.h"
@@ -58,9 +59,9 @@ typedef enum {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define Clock_Frequency 36000 //KHz
-#define WS28XX_LEFT_LED_COUNT 37
+#define WS28XX_LEFT_LED_COUNT 25
 #define WS28XX_MIDDLE_LED_COUNT 150
-#define WS28XX_RIGHT_LED_COUNT 37
+#define WS28XX_RIGHT_LED_COUNT 25
 
 #define WAVE_PACKET_SIZE 7
 #define WAVE_SPEED 5 // Increase number to reduce speed
@@ -115,9 +116,9 @@ HeadlampState current_headlamp_state = HEADLAMP_OFF;
 int frame_pa8 = 0, frame_pa9 = 0, frame_pa10 = 0;
 int wave_count = 0;
 int drl_wave_complete_middle = 0;  // Flag to indicate when the middle strip completes DRL wave
-int is_drl_displayed_pa8 = 0;  // Flag for DRL display status for left strip
-int is_drl_displayed_pa10 = 0; // Flag for DRL display status for right strip
-int is_drl_displayed_pa9 = 0;  // Flag for middle strip to avoid flickering
+int is_drl_displayed_pa8 = 0;      // Flag for DRL display status for left strip
+int is_drl_displayed_pa10 = 0;     // Flag for DRL display status for right strip
+int is_drl_displayed_pa9 = 0;      // Flag for middle strip to avoid flickering
 
 int soc_percentage = 40;  // Example value
 
@@ -127,7 +128,10 @@ int turn_signal_left_received = 0, turn_signal_right_received = 0;
 int horn_signal_received = 0, headlamp_low_beam_signal_received = 0, headlamp_high_beam_signal_received = 0;
 int breathing_signal_received = 0;  // Breathing mode control
 
-uint8_t UART_received_byte = 0;
+//uint8_t UART_received_byte = 0;
+uint16_t adc_val_pa3, adc_val_pa2, adc_val_pa4;
+float voltage_pa3, voltage_pa2, voltage_pa4;
+const float VREF = 3.3;
 
 #ifdef TEST_MODE
 /* Variables for Test Mode */
@@ -137,7 +141,7 @@ uint32_t last_time_right_strip = 0;   // Timing for right side strip
 uint32_t last_time_side_strip = 0;
 uint32_t last_time_horn = 0;          // Timing for horn
 uint32_t last_time_headlamp = 0;      // Timing for headlamp
-uint32_t current_time = 0;        // Horn should be on for 300 ms
+uint32_t current_time = 0;            // Horn should be on for 300 ms
 #endif
 
 /* USER CODE END PV */
@@ -165,6 +169,15 @@ bool UART_Receive(uint8_t *data, uint32_t timeout);
 void ProcessUARTMessage(uint8_t received_byte);
 void UART_ReceiveAndProcess(void);
 void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration);
+void ADC_Select_CH3 (void);
+void ADC_Select_CH4 (void);
+void ADC_Select_CH2 (void);
+uint8_t DebouncePin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay);
+void readSteeringControls(void);
+void readBrakeSwitch(void);
+void readReverseGear(void);
+void readHorn(void);
+void Init_InputPins(void);
 #ifdef TEST_MODE
 void Handle_TestMode(void);
 #endif
@@ -207,7 +220,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_TIM1_Init();
-//  UART_Init();
+  MX_ADC1_Init();
   GPIO_Init_PA0_PA1_PA6();
   /* USER CODE BEGIN 2 */
   WS28XX_Init(&ws_pa8, &htim1, 36, TIM_CHANNEL_1, WS28XX_LEFT_LED_COUNT);   // Initialize for PA8
@@ -215,35 +228,38 @@ int main(void)
   WS28XX_Init(&ws_pa10, &htim1, 36, TIM_CHANNEL_3, WS28XX_RIGHT_LED_COUNT); // Initialize for PA10
   SetGPIOHigh(GPIOA, GPIO_PIN_0);  //  Horn Off
   SetGPIOHigh(GPIOA, GPIO_PIN_1);  //  Head Lamp off
-  SetGPIOHigh(GPIOA, GPIO_PIN_6);  //  Low Beam
+  SetGPIOHigh(GPIOA, GPIO_PIN_6);  //  in Low Beam Mode
+  Init_InputPins();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-//	    // Receive a byte and echo it back to the terminal
-//	    if (UART_Receive(&UART_received_byte, 1000))  // Wait up to 1000 ms for a byte
-//	    {
-//	        UART_Send(UART_received_byte);  // Echo the received byte back to the terminal
-//	    }
-		#ifdef TEST_MODE
-			Handle_TestMode();  // Call the test mode handler
-		#endif
+	// ========================
+	// Handle UART Communication
+	// ========================
+       // UART_ReceiveAndProcess();
 
-		// ========================
-		// Handle UART Communication
-		// ========================
-//		UART_ReceiveAndProcess();
+	// ========================
+	// Handle Inputs and Update Flags
+	// ========================
+	readBrakeSwitch();
+	readSteeringControls();
+	readHorn();
+	readReverseGear();
 
-		// ========================
-		// Handle State Machines
-		// ========================
-		HandleMiddleStripState();
-		HandleLeftStripState();
-		HandleRightStripState();
-		HandleHornState();
-		HandleHeadlampState();
+	#ifdef TEST_MODE
+	    Handle_TestMode();  // Call the test mode handler
+	#endif
+	// ========================
+	// Handle State Machines
+	// ========================
+	  HandleMiddleStripState();
+	  HandleLeftStripState();
+	  HandleRightStripState();
+	  HandleHornState();
+	  HandleHeadlampState();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -259,6 +275,7 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -284,6 +301,12 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV4;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
@@ -486,7 +509,7 @@ void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displa
     ResetLEDStrip(ws, pixel_count);
 
     for (int i = 0; i < pixel_count; i++) {
-        WS28XX_SetPixel_RGB_565(ws, i, COLOR_RGB565_WHITE);  // Set all LEDs to full white
+        WS28XX_SetPixel_RGB_888(ws, i, COLOR_RGB888_WHITE);  // Set all LEDs to full white
     }
 
     WS28XX_Update(ws);  // Refresh the strip with the new DRL state
@@ -518,7 +541,7 @@ void UpdateHazardBlink(int led_count)
 void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count)
 {
     for (int i = 0; i < pixel_count; i++) {
-        WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_BLACK, 0);
+        WS28XX_SetPixel_RGBW_888(ws, i, COLOR_RGB888_BLACK, 0);
     }
     WS28XX_Update(ws);
 }
@@ -542,13 +565,15 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
                 ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs for next wave update
                 for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
                     if (frame_left - i >= 0) {
-                        WS28XX_SetPixel_RGB_888(ws, frame_left - i, 0xFFFFFF);  // Set white color with RGB 888
+                        WS28XX_SetPixel_RGBW_888(ws, frame_left - i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color with RGB 888
                     }
                     if (frame_right + i < WS28XX_MIDDLE_LED_COUNT) {
-                        WS28XX_SetPixel_RGB_888(ws, frame_right + i, 0xFFFFFF);  // Set white color with RGB 888
+                        WS28XX_SetPixel_RGBW_888(ws, frame_right + i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color with RGB 888
                     }
                 }
                 WS28XX_Update(ws);
+                HAL_Delay(6);
+                HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
 
                 frame_left--;
                 frame_right++;
@@ -562,13 +587,15 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
                 ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs for the next update
                 for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
                     if (frame_left + i < MIDDLE_LED_MID_INDEX) {
-                        WS28XX_SetPixel_RGB_888(ws, frame_left + i, 0xFFFFFF);  // Set white color
+                        WS28XX_SetPixel_RGBW_888(ws, frame_left + i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color
                     }
                     if (frame_right - i >= MIDDLE_LED_MID_INDEX) {
-                        WS28XX_SetPixel_RGB_888(ws, frame_right - i, 0xFFFFFF);  // Set white color
+                        WS28XX_SetPixel_RGBW_888(ws, frame_right - i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color
                     }
                 }
                 WS28XX_Update(ws);
+                HAL_Delay(6);
+                HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
 
                 frame_left++;
                 frame_right--;
@@ -587,10 +614,12 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
     } else if (!drl_wave_complete_middle) {
         if (current_time - last_update_time >= STARTUP_WAVE_SPEED * 2) {  // Slower speed for smooth sequential effect
             // Light up LEDs sequentially from center to edges
-            WS28XX_SetPixel_RGB_888(ws, MIDDLE_LED_MID_INDEX - sequential_turn_on, 0xFFFFFF);  // White
-            WS28XX_SetPixel_RGB_888(ws, MIDDLE_LED_MID_INDEX + sequential_turn_on, 0xFFFFFF);  // White
+            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX - sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // White
+            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX + sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // White
 
             WS28XX_Update(ws);
+            HAL_Delay(6);
+            HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
             sequential_turn_on++;
 
             // Check if all LEDs have been turned on
@@ -604,14 +633,47 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
     } else {
         // Set all LEDs to DRL mode (steady white)
         for (int i = 0; i < WS28XX_MIDDLE_LED_COUNT; i++) {
-            WS28XX_SetPixel_RGB_888(ws, i, 0xFFFFFF);  // Full brightness in DRL mode
+            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // Full brightness in DRL mode
         }
         WS28XX_Update(ws);
+        HAL_Delay(6);
+        HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
 
         drl_signal_received = 1;  // Signal that DRL mode is active
         wave_count_middle = 0;    // Reset wave count for future sequences
         drl_wave_complete_middle = 0;  // Reset DRL completion flag
         sequential_turn_on = 0;   // Reset sequential turn-on counter
+    }
+}
+
+void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration)
+{
+    static int last_update_time = 0;
+    static uint8_t brightness = 0;
+    static int increasing = 1; // 1 for increasing, 0 for decreasing
+    int current_time = HAL_GetTick();
+
+    // Adjust duration for smoother transitions
+    if (current_time - last_update_time >= duration) {
+        last_update_time = current_time;
+
+        // Modify brightness increment/decrement step for smoother effect
+        if (increasing) {
+            brightness += 1;  // Increase brightness step by 5
+            if (brightness >= 255) increasing = 0; // Reverse direction
+        } else {
+            brightness -= 1;
+            if (brightness <= 0) increasing = 1;  // Reverse direction
+        }
+
+        // Apply brightness level to each LED
+        for (int i = 0; i < ws->MaxPixel; i++) {
+            WS28XX_SetPixel_RGBW_888(ws, i, COLOR_RGB888_WHITE, brightness);
+        }
+
+        WS28XX_Update(ws);  // Refresh LED strip with current brightness level
+        HAL_Delay(6);
+        HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
     }
 }
 
@@ -730,141 +792,225 @@ void HandleHeadlampState(void)
     }
 }
 
-void UART_Init(void)
+void readSteeringControls(void)
 {
-    // Enable clock for GPIOB and USART3
-    RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;   // Enable GPIOB clock
-    RCC->APB1ENR |= RCC_APB1ENR_USART3EN; // Enable USART3 clock
+	  if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)==0 && hazard_signal_received == 0){
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET); // give 12 volt power through relay connected to PB1
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET); //sending signal to rear side
+		  hazard_signal_received = 1;
+	  }else if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)==0 && hazard_signal_received == 1){
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET); // removing 12 volt power through relay
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); //sending signal to rear side
+		  hazard_signal_received = 0;
+	  }
 
-    // Configure PB10 (TX) and PB11 (RX)
-    GPIOB->CRH &= ~(GPIO_CRH_CNF10 | GPIO_CRH_MODE10 | GPIO_CRH_CNF11 | GPIO_CRH_MODE11); // Reset the bits first
-    GPIOB->CRH |= (GPIO_CRH_CNF10_1 | GPIO_CRH_MODE10_1);  // PB10: Alternate function push-pull for TX
-    GPIOB->CRH |= GPIO_CRH_CNF11_0;                        // PB11: Input floating for RX
+	  ADC_Select_CH3();
+	  HAL_ADC_Start(&hadc1);
+	  HAL_ADC_PollForConversion(&hadc1, 100);
+	  adc_val_pa3 = HAL_ADC_GetValue(&hadc1);
+	  voltage_pa3 = (adc_val_pa3 * VREF) / 4095.0; // Convert to voltage
+	  HAL_ADC_Stop(&hadc1);
 
-    // Set the baud rate
-    USART3->BRR = (Clock_Frequency * 1000) / BAUD_RATE;
+	  ADC_Select_CH4();
+	  HAL_ADC_Start(&hadc1);
+      HAL_ADC_PollForConversion(&hadc1, 100);
+	  adc_val_pa4 = HAL_ADC_GetValue(&hadc1);
+	  voltage_pa4 = (adc_val_pa4 * VREF) / 4095.0; // Convert to voltage
+	  HAL_ADC_Stop(&hadc1);
 
-    // Enable USART3, TX, and RX
-    USART3->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
-}
+	  ADC_Select_CH2();
+	  HAL_ADC_Start(&hadc1);
+	  HAL_ADC_PollForConversion(&hadc1, 100);
+	  adc_val_pa2 = HAL_ADC_GetValue(&hadc1);
+	  voltage_pa2 = (adc_val_pa2 * VREF) / 4095.0; // Convert to voltage
+	  HAL_ADC_Stop(&hadc1);
 
-void UART_Send(uint8_t data)
-{
-    while (!(USART3->SR & USART_SR_TXE));  // Wait until TX buffer is empty
-    USART3->DR = data;                     // Send the data
-}
+	      if (voltage_pa3 < 2.6 && voltage_pa3 > 2.3){
+	    	  turn_signal_left_received = 0; /// off left indicator
+	  		  turn_signal_right_received = 1; /// on right indicator
+	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);  // on right indicator sending to rear
+	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // off left indicator sending to rear
 
-bool UART_Receive(uint8_t *data, uint32_t timeout)
-{
-    uint32_t startTime = HAL_GetTick();
-    while (!(USART3->SR & USART_SR_RXNE))  // Wait until RX buffer is not empty
-    {
-        if ((HAL_GetTick() - startTime) >= timeout)
-        {
-            return false;  // Timeout reached
-        }
-    }
-    *data = (uint8_t)USART3->DR;  // Read received data
-    return true;
-}
 
-void ProcessUARTMessage(uint8_t received_byte)
-{
-    // Side LED Strips Control (Bits 4 and 5)
-    switch ((received_byte >> 4) & 0b11) {
-        case 0b00:
-            drl_signal_received = 1;         // DRL Mode
-            turn_signal_left_received = 0;
-            turn_signal_right_received = 0;
-            hazard_signal_received = 0;
-            break;
-        case 0b01:
-            drl_signal_received = 0;
-            turn_signal_left_received = 1;   // Left Turn Signal
-            turn_signal_right_received = 0;
-            hazard_signal_received = 0;
-            break;
-        case 0b10:
-            drl_signal_received = 0;
-            turn_signal_left_received = 0;
-            turn_signal_right_received = 1;  // Right Turn Signal
-            hazard_signal_received = 0;
-            break;
-        case 0b11:
-            drl_signal_received = 0;
-            turn_signal_left_received = 0;
-            turn_signal_right_received = 0;
-            hazard_signal_received = 0;      // Hazard Mode
-            break;
-    }
+	      } else if (voltage_pa3 < 1.7 && voltage_pa3 > 1.4){
+	  		  turn_signal_right_received = 0; /// off right indicator
+	  		  turn_signal_left_received = 1; /// on left indicator
+	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);  // off right indicator sending to rear
+	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // on left indicator sending to rear
+	      }else{
+	    	  turn_signal_right_received = 0; /// off right indicator
+	    	  turn_signal_left_received = 0; /// off left indicator
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);  // off right indicator sending to rear
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // off left indicator sending to rear
+	  	  }
 
-    // Headlamp Control (Bits 1 and 2)
-    switch ((received_byte >> 1) & 0b11) {
-        case 0b00:
-            headlamp_low_beam_signal_received = 0;  // Headlamp off
-            headlamp_high_beam_signal_received = 0;
-            break;
-        case 0b01:
-            headlamp_low_beam_signal_received = 0;
-            headlamp_high_beam_signal_received = 1;  // High Beam
-            break;
-        case 0b10:
-            headlamp_low_beam_signal_received = 1;  // Low Beam
-            headlamp_high_beam_signal_received = 0;
-            break;
-        case 0b11:
-            // Don't care (keep the current headlamp state)
-            break;
-    }
+	      if (voltage_pa4 < 2.6 && voltage_pa4 > 2.3){
+	    	  headlamp_high_beam_signal_received = 1; /// turn on highbeam
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
 
-    // Horn Control (Bit 0)
-    horn_signal_received = (received_byte & 0b00000001);  // Horn on/off
-}
+	      } else if (voltage_pa4 < 1.7 && voltage_pa4 > 1.4){
+	    	  headlamp_high_beam_signal_received = 1; /// turn on highbeam
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
+	      }else{
+	    	  headlamp_high_beam_signal_received = 0; /// turn off flasher
+	  	  }
 
-void UART_ReceiveAndProcess(void)
-{
-    if (UART_Receive(&UART_received_byte, 1000)) {  // Timeout of 1000 ms
-//    	UART_Send(UART_received_byte);  // Echo the received byte back to the terminal
-        ProcessUARTMessage(UART_received_byte);  // Process the byte to set flags
-    }
+	      if (voltage_pa2 < 2.2 && voltage_pa2 > 1.8){
+	    	  headlamp_low_beam_signal_received = 0; // turn off low beam
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
+	      } else if (voltage_pa2 < 2.95 && voltage_pa2 > 2.6){
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
+	       	  headlamp_low_beam_signal_received = 1; // turn on low beam
+	      }else{
+	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET); // Sending position OFF to rear side
+	       	  headlamp_low_beam_signal_received = 0; // turn off low beam
+	      }
+
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
 	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_3);
-//	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+//	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2); //We don't stop this PWM as this LED strip is too long and doesn't get update fast enough
 }
 
-void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration)
+void ADC_Select_CH3(void)
 {
-    static int last_update_time = 0;
-    static uint8_t brightness = 0;
-    static int increasing = 1; // 1 for increasing, 0 for decreasing
-    int current_time = HAL_GetTick();
+	ADC_ChannelConfTypeDef sConfig = {0};
+	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+	  */
+	  sConfig.Channel = ADC_CHANNEL_3;
+	  sConfig.Rank = 1;
+	  sConfig.SamplingTime = ADC_SAMPLETIME_28CYCLES_5;
+	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+	  {
+	    Error_Handler();
+	  }
+}
 
-    // Adjust duration for smoother transitions
-    if (current_time - last_update_time >= duration) {
-        last_update_time = current_time;
+void ADC_Select_CH4(void)
+{
+	ADC_ChannelConfTypeDef sConfig = {0};
+	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+	  */
+	  sConfig.Channel = ADC_CHANNEL_4;
+	  sConfig.Rank = 1;
+	  sConfig.SamplingTime = ADC_SAMPLETIME_41CYCLES_5;
+	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+	  {
+	    Error_Handler();
+	  }
+}
 
-        // Modify brightness increment/decrement step for smoother effect
-        if (increasing) {
-            brightness += 3;  // Increase brightness step by 5
-            if (brightness >= 255) increasing = 0; // Reverse direction
-        } else {
-            brightness -= 3;
-            if (brightness <= 0) increasing = 1;  // Reverse direction
-        }
+void ADC_Select_CH2(void)
+{
+	ADC_ChannelConfTypeDef sConfig = {0};
+	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+	  */
+	  sConfig.Channel = ADC_CHANNEL_2;
+	  sConfig.Rank = 1;
+	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+	  {
+	    Error_Handler();
+	  }
+}
 
-        // Apply brightness level to each LED
-        for (int i = 0; i < ws->MaxPixel; i++) {
-            WS28XX_SetPixel_RGB(ws, i, brightness, brightness, brightness);
-        }
+void Init_InputPins(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-        WS28XX_Update(ws);  // Refresh LED strip with current brightness level
-        HAL_Delay(6);
-        HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+    // Enable clock for GPIO ports
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    // PB12 (Horn), PB13 (Hazard), PB3 (Brake fluid): Floating if inactive, pulled down when active
+    GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    // PB15 (Brake) (3.3V when inactive, GND when brake switch pressed)
+    GPIO_InitStruct.Pin = GPIO_PIN_15;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    // PA12 (Reverse): Pulled up when active
+    GPIO_InitStruct.Pin = GPIO_PIN_12;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void readBrakeSwitch(void)
+{
+    // Use debounce logic with a delay of 50 ms
+    uint8_t brake_pressed = DebouncePin(GPIOB, GPIO_PIN_15, 15);
+
+    if (brake_pressed == GPIO_PIN_RESET) // Active Low: Brake is pressed
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); // Set PB4
     }
+    else
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); // Reset PB4
+    }
+}
+
+void readHorn(void)
+{
+    // Use debounce logic with a delay of 50 ms
+    uint8_t horn_active = DebouncePin(GPIOB, GPIO_PIN_12, 15);
+
+    if (horn_active == GPIO_PIN_RESET) // Active Low: Horn is pressed
+    {
+        horn_signal_received = 1; // Set horn signal flag
+    }
+    else
+    {
+        horn_signal_received = 0; // Reset horn signal flag
+    }
+}
+
+void readReverseGear(void)
+{
+    uint8_t reverse_active = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_12); // No debounce needed
+
+    if (reverse_active == GPIO_PIN_SET) // Active High: Reverse is engaged
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET); // Set PB6
+    }
+    else
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // Reset PB6
+    }
+}
+
+uint8_t DebouncePin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay)
+{
+    static uint32_t last_tick = 0;
+    static uint8_t stable_state = 0; // Final stable state of the pin
+    static uint8_t counter = 0;     // Counter for consistent reads
+
+    uint8_t current_state = HAL_GPIO_ReadPin(GPIOx, GPIO_Pin);
+
+    if (current_state == stable_state) {
+        counter = 0; // Reset counter if the state matches the stable state
+    } else {
+        if (HAL_GetTick() - last_tick >= debounce_delay) {
+            counter++;
+            last_tick = HAL_GetTick(); // Update last tick only on a state mismatch
+        }
+
+        if (counter >= 3) { // Require three consistent reads
+            stable_state = current_state;
+            counter = 0; // Reset counter after updating the stable state
+        }
+    }
+
+    return stable_state;
 }
 
 #ifdef TEST_MODE
@@ -919,9 +1065,108 @@ void Handle_TestMode(void)
         last_state_change_time = current_time;
     }
 }
-
 #endif
+
+//void UART_Init(void)
+//{
+//    // Enable clock for GPIOB and USART3
+//    RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;   // Enable GPIOB clock
+//    RCC->APB1ENR |= RCC_APB1ENR_USART3EN; // Enable USART3 clock
+//
+//    // Configure PB10 (TX) and PB11 (RX)
+//    GPIOB->CRH &= ~(GPIO_CRH_CNF10 | GPIO_CRH_MODE10 | GPIO_CRH_CNF11 | GPIO_CRH_MODE11); // Reset the bits first
+//    GPIOB->CRH |= (GPIO_CRH_CNF10_1 | GPIO_CRH_MODE10_1);  // PB10: Alternate function push-pull for TX
+//    GPIOB->CRH |= GPIO_CRH_CNF11_0;                        // PB11: Input floating for RX
+//
+//    // Set the baud rate
+//    USART3->BRR = (Clock_Frequency * 1000) / BAUD_RATE;
+//
+//    // Enable USART3, TX, and RX
+//    USART3->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
+//}
+//
+//void UART_Send(uint8_t data)
+//{
+//    while (!(USART3->SR & USART_SR_TXE));  // Wait until TX buffer is empty
+//    USART3->DR = data;                     // Send the data
+//}
+//
+//bool UART_Receive(uint8_t *data, uint32_t timeout)
+//{
+//    uint32_t startTime = HAL_GetTick();
+//    while (!(USART3->SR & USART_SR_RXNE))  // Wait until RX buffer is not empty
+//    {
+//        if ((HAL_GetTick() - startTime) >= timeout)
+//        {
+//            return false;  // Timeout reached
+//        }
+//    }
+//    *data = (uint8_t)USART3->DR;  // Read received data
+//    return true;
+//}
+//
+//void ProcessUARTMessage(uint8_t received_byte)
+//{
+//    // Side LED Strips Control (Bits 4 and 5)
+//    switch ((received_byte >> 4) & 0b11) {
+//        case 0b00:
+//            drl_signal_received = 1;         // DRL Mode
+//            turn_signal_left_received = 0;
+//            turn_signal_right_received = 0;
+//            hazard_signal_received = 0;
+//            break;
+//        case 0b01:
+//            drl_signal_received = 0;
+//            turn_signal_left_received = 1;   // Left Turn Signal
+//            turn_signal_right_received = 0;
+//            hazard_signal_received = 0;
+//            break;
+//        case 0b10:
+//            drl_signal_received = 0;
+//            turn_signal_left_received = 0;
+//            turn_signal_right_received = 1;  // Right Turn Signal
+//            hazard_signal_received = 0;
+//            break;
+//        case 0b11:
+//            drl_signal_received = 0;
+//            turn_signal_left_received = 0;
+//            turn_signal_right_received = 0;
+//            hazard_signal_received = 0;      // Hazard Mode
+//            break;
+//    }
+//
+//    // Headlamp Control (Bits 1 and 2)
+//    switch ((received_byte >> 1) & 0b11) {
+//        case 0b00:
+//            headlamp_low_beam_signal_received = 0;  // Headlamp off
+//            headlamp_high_beam_signal_received = 0;
+//            break;
+//        case 0b01:
+//            headlamp_low_beam_signal_received = 0;
+//            headlamp_high_beam_signal_received = 1;  // High Beam
+//            break;
+//        case 0b10:
+//            headlamp_low_beam_signal_received = 1;  // Low Beam
+//            headlamp_high_beam_signal_received = 0;
+//            break;
+//        case 0b11:
+//            // Don't care (keep the current headlamp state)
+//            break;
+//    }
+//
+//    // Horn Control (Bit 0)
+//    horn_signal_received = (received_byte & 0b00000001);  // Horn on/off
+//}
+//
+//void UART_ReceiveAndProcess(void)
+//{
+//    if (UART_Receive(&UART_received_byte, 1000)) {  // Timeout of 1000 ms
+////    	UART_Send(UART_received_byte);  // Echo the received byte back to the terminal
+//        ProcessUARTMessage(UART_received_byte);  // Process the byte to set flags
+//    }
+//}
 /* USER CODE END 4 */
+
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
