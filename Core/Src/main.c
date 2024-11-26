@@ -54,6 +54,8 @@ typedef enum {
     HEADLAMP_LOW_BEAM,
     HEADLAMP_HIGH_BEAM
 } HeadlampState;
+
+enum pinstate { no_change = 0, rising_edge = 1, falling_edge = 2};
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -83,8 +85,10 @@ typedef enum {
 #define BREATHING_DURATION 1
 
 #define BAUD_RATE 9600
+#define debounceDelay 10
+#define debounceSamplesCount 5
 // Define Test_Mode to run in the test mode, this tests if the software is able to run the hardware in different states.
-#define TEST_MODE 1
+//#define TEST_MODE 1
 #ifdef TEST_MODE
 #define TOGGLE_INTERVAL 10000         // 10 seconds for state transitions
 #define HORN_ON_DURATION 300          // Horn should be on for 300 ms
@@ -172,12 +176,17 @@ void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration);
 void ADC_Select_CH3 (void);
 void ADC_Select_CH4 (void);
 void ADC_Select_CH2 (void);
-uint8_t DebouncePin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay);
 void readSteeringControls(void);
 void readBrakeSwitch(void);
 void readReverseGear(void);
 void readHorn(void);
 void Init_InputPins(void);
+void InitFastOutputPins(void);
+void ADC_Select_CH5(void);
+void ADC_Select_CH7(void);
+void readHazardSwitch(void);
+uint8_t DetectEdge(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay);
+int DebounceHazardPin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay);
 #ifdef TEST_MODE
 void Handle_TestMode(void);
 #endif
@@ -222,6 +231,7 @@ int main(void)
   MX_TIM1_Init();
   MX_ADC1_Init();
   GPIO_Init_PA0_PA1_PA6();
+  InitFastOutputPins();
   /* USER CODE BEGIN 2 */
   WS28XX_Init(&ws_pa8, &htim1, 36, TIM_CHANNEL_1, WS28XX_LEFT_LED_COUNT);   // Initialize for PA8
   WS28XX_Init(&ws_pa9, &htim1, 36, TIM_CHANNEL_2, WS28XX_MIDDLE_LED_COUNT); // Initialize for PA9 (middle strip)
@@ -236,6 +246,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+//	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET);
 	// ========================
 	// Handle UART Communication
 	// ========================
@@ -248,6 +259,7 @@ int main(void)
 	readSteeringControls();
 	readHorn();
 	readReverseGear();
+	readHazardSwitch();
 
 	#ifdef TEST_MODE
 	    Handle_TestMode();  // Call the test mode handler
@@ -312,7 +324,71 @@ void SystemClock_Config(void)
   }
 }
 
+
 /* USER CODE BEGIN 4 */
+void Init_InputPins(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    // Enable clock for GPIO ports
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    // PB12 (Horn), PB13 (Hazard), PB3 (Brake fluid): Floating if inactive, pulled down when active
+    GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    // PB15 (Brake) (3.3V when inactive, GND when brake switch pressed)
+    GPIO_InitStruct.Pin = GPIO_PIN_15;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    // PA12 (Reverse): Pulled up when active
+    GPIO_InitStruct.Pin = GPIO_PIN_12;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_2;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP; // Push-pull mode
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW; // High-speed configuration
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
+
+
+void InitFastOutputPins(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    // Enable the GPIOB clock
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    // Configure PB4 to PB9 as fast outputs with pull-down resistors
+    GPIO_InitStruct.Pin = GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP; // Push-pull mode
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;       // Enable pull-down resistors
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH; // High-speed configuration
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+
+
+    // Set all pins to their default inactive state (low)
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_RESET);
+    // Configure PB4 to PB9 as fast outputs with pull-down resistors
+    GPIO_InitStruct.Pin = GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP; // Push-pull mode
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH; // High-speed configuration
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET); // Driving relay, inactive state is GPIO pin set
+}
+
+
 void GPIO_Init_PA0_PA1_PA6(void)
 {
     // Enable GPIOA clock (assuming it's AHB1 on your microcontroller)
@@ -323,6 +399,8 @@ void GPIO_Init_PA0_PA1_PA6(void)
     // PA0 Configuration
     GPIOA->CRL &= ~GPIO_CRL_CNF0;   // Clear CNF0[1:0] (set as push-pull)
     GPIOA->CRL |= GPIO_CRL_MODE0_1 | GPIO_CRL_MODE0_0;  // Set MODE0 to 11 (high-speed output 50 MHz)
+    GPIOA->ODR |= GPIO_ODR_ODR0;  // Set PA0 high
+
 
     // PA1 Configuration
     GPIOA->CRL &= ~GPIO_CRL_CNF1;   // Clear CNF1[1:0] (set as push-pull)
@@ -337,6 +415,7 @@ void GPIO_Init_PA0_PA1_PA6(void)
     GPIOA->ODR |= GPIO_ODR_ODR1;  // Set PA1 high
     GPIOA->ODR |= GPIO_ODR_ODR6;  // Set PA6 high
 }
+
 
 void HandleMiddleStripState(void) {
 	// Adjusted priority code for setting current_mode_pa9
@@ -370,6 +449,7 @@ void HandleMiddleStripState(void) {
             break;
     }
 }
+
 
 void HandleLeftStripState(void)
 {
@@ -405,7 +485,7 @@ void HandleLeftStripState(void)
         case HAZARD_LIGHT_MODE:
             frame_pa8 = 0;
             UpdateHazardBlink(WS28XX_LEFT_LED_COUNT);
-            HAL_Delay(HAZARD_BLINK_DELAY);
+           // HAL_Delay(HAZARD_BLINK_DELAY);
             is_drl_displayed_pa8 = 0;  // Reset DRL flag
             break;
 
@@ -427,6 +507,7 @@ void HandleLeftStripState(void)
             break;
     }
 }
+
 
 void HandleRightStripState(void)
 {
@@ -462,7 +543,7 @@ void HandleRightStripState(void)
         case HAZARD_LIGHT_MODE:
             frame_pa10 = 0;
             UpdateHazardBlink(WS28XX_RIGHT_LED_COUNT);
-            HAL_Delay(HAZARD_BLINK_DELAY);
+//            HAL_Delay(HAZARD_BLINK_DELAY);
             is_drl_displayed_pa10 = 0;
             break;
 
@@ -485,6 +566,7 @@ void HandleRightStripState(void)
     }
 }
 
+
 void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
 {
     ResetLEDStrip(ws, pixel_count);
@@ -497,6 +579,7 @@ void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
     }
     WS28XX_Update(ws);
 }
+
 
 void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displayed)
 {
@@ -520,6 +603,7 @@ void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displa
     *is_drl_displayed = 1;
 }
 
+
 void UpdateHazardBlink(int led_count)
 {
     static int blink_on = 0;  // Track blink state (on/off)
@@ -538,6 +622,7 @@ void UpdateHazardBlink(int led_count)
     WS28XX_Update(&ws_pa10);
 }
 
+
 void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count)
 {
     for (int i = 0; i < pixel_count; i++) {
@@ -545,6 +630,7 @@ void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count)
     }
     WS28XX_Update(ws);
 }
+
 
 void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
 {
@@ -646,6 +732,7 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
     }
 }
 
+
 void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration)
 {
     static int last_update_time = 0;
@@ -676,6 +763,7 @@ void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration)
         HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
     }
 }
+
 
 void UpdateSOCIndication(WS28XX_HandleTypeDef* ws, int soc_percentage, int charging_type) {
     static int last_update_time = 0;
@@ -730,15 +818,18 @@ void UpdateSOCIndication(WS28XX_HandleTypeDef* ws, int soc_percentage, int charg
     }
 }
 
+
 void SetGPIOHigh(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin)
 {
     HAL_GPIO_WritePin(GPIOx, GPIO_Pin, GPIO_PIN_SET);
 }
 
+
 void SetGPIOLow(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin)
 {
     HAL_GPIO_WritePin(GPIOx, GPIO_Pin, GPIO_PIN_RESET);
 }
+
 
 void HandleHornState(void)
 {
@@ -759,6 +850,7 @@ void HandleHornState(void)
             break;
     }
 }
+
 
 void HandleHeadlampState(void)
 {
@@ -792,18 +884,37 @@ void HandleHeadlampState(void)
     }
 }
 
-void readSteeringControls(void)
+
+void readHazardSwitch(void)
 {
-	  if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)==0 && hazard_signal_received == 0){
+	  uint8_t switchedge = DetectEdge(GPIOB, GPIO_PIN_13, debounceDelay);
+	  uint8_t hazard_pressed = 0;
+
+	  if (switchedge == falling_edge){
+		  hazard_pressed = 1;
+	  }else
+	  {
+		  hazard_pressed = 0;
+	  }
+//	  if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)==GPIO_PIN_RESET && hazard_signal_received == 0){
+	  if(hazard_pressed && (hazard_signal_received == 0)){ // hazard press is active low
 		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET); // give 12 volt power through relay connected to PB1
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET);
 		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET); //sending signal to rear side
 		  hazard_signal_received = 1;
-	  }else if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)==0 && hazard_signal_received == 1){
+//	  }else if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13)==GPIO_PIN_RESET && hazard_signal_received == 1){
+	  }else if(hazard_pressed && (hazard_signal_received == 1)){
 		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET); // removing 12 volt power through relay
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
 		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); //sending signal to rear side
 		  hazard_signal_received = 0;
+//		  HAL_Delay(100);
 	  }
+}
 
+
+void readSteeringControls(void)
+{
 	  ADC_Select_CH3();
 	  HAL_ADC_Start(&hadc1);
 	  HAL_ADC_PollForConversion(&hadc1, 100);
@@ -868,12 +979,14 @@ void readSteeringControls(void)
 
 }
 
+
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
 	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_3);
 //	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2); //We don't stop this PWM as this LED strip is too long and doesn't get update fast enough
 }
+
 
 void ADC_Select_CH3(void)
 {
@@ -889,6 +1002,7 @@ void ADC_Select_CH3(void)
 	  }
 }
 
+
 void ADC_Select_CH4(void)
 {
 	ADC_ChannelConfTypeDef sConfig = {0};
@@ -902,6 +1016,7 @@ void ADC_Select_CH4(void)
 	    Error_Handler();
 	  }
 }
+
 
 void ADC_Select_CH2(void)
 {
@@ -917,39 +1032,44 @@ void ADC_Select_CH2(void)
 	  }
 }
 
-void Init_InputPins(void)
+
+void ADC_Select_CH5(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    // Enable clock for GPIO ports
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-
-    // PB12 (Horn), PB13 (Hazard), PB3 (Brake fluid): Floating if inactive, pulled down when active
-    GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    // PB15 (Brake) (3.3V when inactive, GND when brake switch pressed)
-    GPIO_InitStruct.Pin = GPIO_PIN_15;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    // PA12 (Reverse): Pulled up when active
-    GPIO_InitStruct.Pin = GPIO_PIN_12;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	ADC_ChannelConfTypeDef sConfig = {0};
+	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+	  */
+	  sConfig.Channel = ADC_CHANNEL_5;
+	  sConfig.Rank = 1;
+	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+	  {
+	    Error_Handler();
+	  }
 }
+
+
+void ADC_Select_CH7(void)
+{
+	ADC_ChannelConfTypeDef sConfig = {0};
+	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+	  */
+	  sConfig.Channel = ADC_CHANNEL_7;
+	  sConfig.Rank = 1;
+	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+	  {
+	    Error_Handler();
+	  }
+}
+
 
 void readBrakeSwitch(void)
 {
     // Use debounce logic with a delay of 50 ms
-    uint8_t brake_pressed = DebouncePin(GPIOB, GPIO_PIN_15, 15);
+//    uint8_t brake_pressed = DebouncePin(GPIOB, GPIO_PIN_15, 50);
 
-    if (brake_pressed == GPIO_PIN_RESET) // Active Low: Brake is pressed
+    if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15) == GPIO_PIN_RESET) // Active Low: Brake is pressed
+//    if (!brake_pressed) // Active Low: Brake is pressed
     {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); // Set PB4
     }
@@ -959,12 +1079,14 @@ void readBrakeSwitch(void)
     }
 }
 
+
 void readHorn(void)
 {
     // Use debounce logic with a delay of 50 ms
-    uint8_t horn_active = DebouncePin(GPIOB, GPIO_PIN_12, 15);
+//    uint8_t horn_active = DebouncePin(GPIOB, GPIO_PIN_12, 50);
 
-    if (horn_active == GPIO_PIN_RESET) // Active Low: Horn is pressed
+    if (HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_12) == GPIO_PIN_RESET) // Active Low: Horn is pressed
+//    if (!horn_active) // Active Low: Horn is pressed
     {
         horn_signal_received = 1; // Set horn signal flag
     }
@@ -974,9 +1096,10 @@ void readHorn(void)
     }
 }
 
+
 void readReverseGear(void)
 {
-    uint8_t reverse_active = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_12); // No debounce needed
+    uint8_t reverse_active = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_12); // No debounce needed directpin
 
     if (reverse_active == GPIO_PIN_SET) // Active High: Reverse is engaged
     {
@@ -988,30 +1111,54 @@ void readReverseGear(void)
     }
 }
 
-uint8_t DebouncePin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay)
+int DebounceHazardPin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay)
 {
-    static uint32_t last_tick = 0;
-    static uint8_t stable_state = 0; // Final stable state of the pin
-    static uint8_t counter = 0;     // Counter for consistent reads
+	static int keypress_begin_time = 0;
+    static int last_keypress_state = 1;
+    static int debounce_loop_count = 0;
+    int current_keypress_state = 0;
 
-    uint8_t current_state = HAL_GPIO_ReadPin(GPIOx, GPIO_Pin);
+	current_keypress_state = HAL_GPIO_ReadPin(GPIOx, GPIO_Pin);
+	debounce_loop_count++;
 
-    if (current_state == stable_state) {
-        counter = 0; // Reset counter if the state matches the stable state
-    } else {
-        if (HAL_GetTick() - last_tick >= debounce_delay) {
-            counter++;
-            last_tick = HAL_GetTick(); // Update last tick only on a state mismatch
-        }
+	if (current_keypress_state != last_keypress_state)
+	{
+		keypress_begin_time = HAL_GetTick();
+		debounce_loop_count = 0;
+	}
 
-        if (counter >= 3) { // Require three consistent reads
-            stable_state = current_state;
-            counter = 0; // Reset counter after updating the stable state
-        }
-    }
+	if (((HAL_GetTick() - keypress_begin_time) >= debounce_delay) &&( debounce_loop_count > debounceSamplesCount))
+	{
+		last_keypress_state = current_keypress_state;
+		return current_keypress_state;
+	}
+	return 0;
 
-    return stable_state;
 }
+
+
+uint8_t DetectEdge(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay)
+{
+	static int prev_pin_state = 0;
+	int curr_pin_state = 0;
+
+	curr_pin_state = DebounceHazardPin(GPIOx,GPIO_Pin,debounce_delay);
+
+	if (prev_pin_state == 0 && curr_pin_state == 1){
+		prev_pin_state = curr_pin_state;
+		return rising_edge;
+	}
+	else if(prev_pin_state == 1 && curr_pin_state == 0) {
+		prev_pin_state = curr_pin_state;
+		return falling_edge;
+	}
+	else{
+		prev_pin_state = curr_pin_state;
+	return no_change;
+	}
+}
+
+#ifdef TEST_MODE
 
 #ifdef TEST_MODE
 void Handle_TestMode(void)
@@ -1065,6 +1212,8 @@ void Handle_TestMode(void)
         last_state_change_time = current_time;
     }
 }
+#endif
+
 #endif
 
 //void UART_Init(void)
