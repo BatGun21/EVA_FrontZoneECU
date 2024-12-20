@@ -11,7 +11,7 @@
   *
   * This software is licensed under terms that can be found in the LICENSE file
   * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * If no LICENSE file comes witstmh this software, it is provided AS-IS.
   *
   ******************************************************************************
   */
@@ -41,7 +41,8 @@ typedef enum {
     HAZARD_LIGHT_MODE, // Hazard/parking light active
     STARTUP_MODE,      // Startup blinking mode
 	CHARGING_MODE,
-	BREATHING_MODE
+	BREATHING_MODE,
+	OFF_MODE
 } LED_Mode;
 
 typedef enum {
@@ -55,6 +56,14 @@ typedef enum {
     HEADLAMP_HIGH_BEAM
 } HeadlampState;
 
+typedef struct {
+    uint8_t stable_value;
+    uint8_t last_value;
+    uint32_t last_debounce_time;
+    uint8_t sample_count;
+} DebounceState;
+
+
 enum pinstate { no_change = 0, rising_edge = 1, falling_edge = 2};
 /* USER CODE END PTD */
 
@@ -65,13 +74,13 @@ enum pinstate { no_change = 0, rising_edge = 1, falling_edge = 2};
 #define WS28XX_MIDDLE_LED_COUNT 150
 #define WS28XX_RIGHT_LED_COUNT 25
 
-#define WAVE_PACKET_SIZE 7
+#define WAVE_PACKET_SIZE 9
 #define WAVE_SPEED 5 // Increase number to reduce speed
 #define WAVE_STEP_SIZE 1
 #define WAVE_PAUSE 10
 
 #define HAZARD_BLINK_DELAY 500
-#define DRL_BRIGHTNESS 255 // Max 255
+#define DRL_BRIGHTNESS 200
 
 #define WAVE_PACKET_SIZE_MIDDLE 4
 #define STARTUP_WAVE_SPEED 1 // Increase number to reduce speed
@@ -87,6 +96,9 @@ enum pinstate { no_change = 0, rising_edge = 1, falling_edge = 2};
 #define BAUD_RATE 9600
 #define debounceDelay 10
 #define debounceSamplesCount 5
+#define DRL_REFRESH_TIME 1000
+#define DEBOUNCE_DELAY 50 // 50ms debounce delay
+#define DEBOUNCE_SAMPLES 5 // Minimum samples required for stable state
 // Define Test_Mode to run in the test mode, this tests if the software is able to run the hardware in different states.
 //#define TEST_MODE 1
 #ifdef TEST_MODE
@@ -127,7 +139,7 @@ int is_drl_displayed_pa9 = 0;      // Flag for middle strip to avoid flickering
 int soc_percentage = 40;  // Example value
 
 // Control signals
-int charging_signal_received = 0, drl_signal_received = 0, hazard_signal_received = 0;
+int charging_signal_received = 0, drl_signal_received = 0, hazard_signal_received = 0, startup_signal_received = 1;
 int turn_signal_left_received = 0, turn_signal_right_received = 0;
 int horn_signal_received = 0, headlamp_low_beam_signal_received = 0, headlamp_high_beam_signal_received = 0;
 int breathing_signal_received = 0;  // Breathing mode control
@@ -136,6 +148,20 @@ int breathing_signal_received = 0;  // Breathing mode control
 uint16_t adc_val_pa3, adc_val_pa2, adc_val_pa4;
 float voltage_pa3, voltage_pa2, voltage_pa4;
 const float VREF = 3.3;
+
+static DebounceState brake_state = {1, 1, 0, 0}; // Because this signal is active low
+static DebounceState horn_state = {1, 1, 0, 0};  // Because this signal is active low
+static DebounceState reverse_state = {0, 0, 0, 0};
+// Global debounce state for steering flags
+static DebounceState turn_signal_left_flag = {0};
+static DebounceState turn_signal_right_flag = {0};
+static DebounceState headlamp_low_beam_flag = {0};
+static DebounceState headlamp_high_beam_flag = {0};
+
+uint8_t turn_signal_left_raw = 0;
+uint8_t turn_signal_right_raw = 0;
+uint8_t headlamp_low_raw = 0;
+uint8_t headlamp_high_raw = 0;
 
 #ifdef TEST_MODE
 /* Variables for Test Mode */
@@ -153,7 +179,7 @@ uint32_t current_time = 0;            // Horn should be on for 300 ms
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count);
+void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count, int direction);
 void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displayed_flag);
 void UpdateHazardBlink(int led_count);
 void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count);
@@ -185,8 +211,10 @@ void InitFastOutputPins(void);
 void ADC_Select_CH5(void);
 void ADC_Select_CH7(void);
 void readHazardSwitch(void);
+void DebounceFlag(DebounceState* flag_state, uint8_t raw_value);
 uint8_t DetectEdge(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay);
 int DebounceHazardPin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay);
+void DebounceInput(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, DebounceState* state);
 #ifdef TEST_MODE
 void Handle_TestMode(void);
 #endif
@@ -349,7 +377,7 @@ void Init_InputPins(void)
     // PA12 (Reverse): Pulled up when active
     GPIO_InitStruct.Pin = GPIO_PIN_12;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = GPIO_PIN_2;
@@ -358,7 +386,6 @@ void Init_InputPins(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW; // High-speed configuration
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
-
 
 void InitFastOutputPins(void)
 {
@@ -374,10 +401,12 @@ void InitFastOutputPins(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH; // High-speed configuration
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-
-
     // Set all pins to their default inactive state (low)
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_RESET);
+
+
+
+
     // Configure PB4 to PB9 as fast outputs with pull-down resistors
     GPIO_InitStruct.Pin = GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP; // Push-pull mode
@@ -387,7 +416,6 @@ void InitFastOutputPins(void)
 
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET); // Driving relay, inactive state is GPIO pin set
 }
-
 
 void GPIO_Init_PA0_PA1_PA6(void)
 {
@@ -416,7 +444,6 @@ void GPIO_Init_PA0_PA1_PA6(void)
     GPIOA->ODR |= GPIO_ODR_ODR6;  // Set PA6 high
 }
 
-
 void HandleMiddleStripState(void) {
 	// Adjusted priority code for setting current_mode_pa9
 	if (charging_signal_received) {
@@ -425,8 +452,11 @@ void HandleMiddleStripState(void) {
 	    current_mode_pa9 = DRL_MODE;       // Next priority: DRL mode if charging is inactive
 	} else if (breathing_signal_received) {
 	    current_mode_pa9 = BREATHING_MODE; // Next: Breathing mode if no charging or DRL
-	} else {
+	} else if (startup_signal_received){
 	    current_mode_pa9 = STARTUP_MODE;   // Default to startup mode if no other signals are active
+	}else
+	{
+		current_mode_pa9 = OFF_MODE;
 	}
 
 
@@ -445,61 +475,98 @@ void HandleMiddleStripState(void) {
             UpdateStartupWaveForMiddle(&ws_pa9);
             is_drl_displayed_pa9 = 0;
             break;
-        default:
+        case OFF_MODE:
+            ResetLEDStrip(&ws_pa9, WS28XX_MIDDLE_LED_COUNT);
+            HAL_Delay(6);
+            HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+            is_drl_displayed_pa9 = 0;
             break;
+        default:
+        	ResetLEDStrip(&ws_pa9, WS28XX_MIDDLE_LED_COUNT);
+        	HAL_Delay(6);
+        	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+        	is_drl_displayed_pa9 = 0;
     }
 }
 
+void HandleLeftStripState(void) {
+    static uint32_t last_blink_time_left = 0;
+    uint32_t current_time = HAL_GetTick();
+    static uint8_t blink_state_left = 0;
 
-void HandleLeftStripState(void)
-{
     // Priority management for left strip
     if (charging_signal_received) {
-        // Check for hazard mode during charging mode
         if (hazard_signal_received) {
-            current_mode_pa8 = HAZARD_LIGHT_MODE;
+            current_mode_pa8 = TURN_SIGNAL_MODE;
         } else {
-            current_mode_pa8 = CHARGING_MODE;  // Side strips off in charging mode unless hazard is active
+            current_mode_pa8 = CHARGING_MODE;
         }
-    }
-    else if (hazard_signal_received) {
-        current_mode_pa8 = HAZARD_LIGHT_MODE;
-    }
-    else if (turn_signal_left_received && !hazard_signal_received) {
-        current_mode_pa8 = TURN_SIGNAL_MODE;
-    }
-    else if (drl_signal_received && !hazard_signal_received && !turn_signal_left_received) {
+    } else if (hazard_signal_received || turn_signal_left_received) {
+//        current_mode_pa8 = HAZARD_LIGHT_MODE;
+    	current_mode_pa8 = TURN_SIGNAL_MODE;
+    } else if (drl_signal_received && !hazard_signal_received && !turn_signal_left_received) {
         current_mode_pa8 = DRL_MODE;
-    }
-    else {
-        current_mode_pa8 = DRL_MODE;
+    } else {
+        current_mode_pa8 = OFF_MODE;
     }
 
     // State machine for left strip (PA8)
     switch (current_mode_pa8) {
         case CHARGING_MODE:
-            ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);  // Turn off left strip in charging mode
-            is_drl_displayed_pa8 = 0;  // Reset DRL flag
+            ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);
+            is_drl_displayed_pa8 = 0;
             break;
 
-        case HAZARD_LIGHT_MODE:
-            frame_pa8 = 0;
-            UpdateHazardBlink(WS28XX_LEFT_LED_COUNT);
-           // HAL_Delay(HAZARD_BLINK_DELAY);
-            is_drl_displayed_pa8 = 0;  // Reset DRL flag
-            break;
+//        case HAZARD_LIGHT_MODE:
+////            if (current_time - last_blink_time_left >= HAZARD_BLINK_DELAY) {
+////                blink_state_left = !blink_state_left; // Toggle blink state
+////                if (blink_state_left)
+////                {
+////                    // Set all LEDs to amber
+////                    for (int i = 0; i < WS28XX_LEFT_LED_COUNT; i++) {
+////                        WS28XX_SetPixel_RGBW_565(&ws_pa8, i, COLOR_RGB565_AMBER, 255);
+////                    }
+////                    WS28XX_Update(&ws_pa8);
+////                } else
+////                {
+////                    // Reset all LEDs to off
+////                    ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);
+////                }
+////                last_blink_time_left = current_time; // Update last blink timestamp
+////            }
+////            is_drl_displayed_pa8 = 0; // Reset DRL flag
+//            break;
 
         case TURN_SIGNAL_MODE:
-            UpdateWaveEffect(&ws_pa8, frame_pa8, WS28XX_LEFT_LED_COUNT);
-            frame_pa8 += WAVE_STEP_SIZE;
-            if (frame_pa8 >= WS28XX_LEFT_LED_COUNT) frame_pa8 = 0;
-            HAL_Delay(WAVE_SPEED);
-            is_drl_displayed_pa8 = 0;  // Reset DRL flag
+            if (current_time - last_blink_time_left >= HAZARD_BLINK_DELAY) {
+                blink_state_left = !blink_state_left; // Toggle blink state
+                if (blink_state_left)
+                {
+                    // Set all LEDs to amber
+                    for (int i = 0; i < WS28XX_LEFT_LED_COUNT; i++) {
+                        WS28XX_SetPixel_RGBW_565(&ws_pa8, i, COLOR_RGB565_AMBER, 255);
+                    }
+                    WS28XX_Update(&ws_pa8);
+                } else
+                {
+                    // Reset all LEDs to off
+                    ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);
+                }
+                last_blink_time_left = current_time; // Update last blink timestamp
+            }
+            is_drl_displayed_pa8 = 0; // Reset DRL flag
             break;
+
 
         case DRL_MODE:
             frame_pa8 = 0;
             UpdateDRLMode(&ws_pa8, WS28XX_LEFT_LED_COUNT, &is_drl_displayed_pa8);
+            break;
+
+        case OFF_MODE:
+            frame_pa8 = 0;
+            ResetLEDStrip(&ws_pa8, WS28XX_LEFT_LED_COUNT);
+            is_drl_displayed_pa8 = 0;
             break;
 
         default:
@@ -508,56 +575,84 @@ void HandleLeftStripState(void)
     }
 }
 
+void HandleRightStripState(void) {
+    static uint32_t last_blink_time_right = 0;
+    uint32_t current_time = HAL_GetTick();
+    static uint8_t blink_state_right = 0;
 
-void HandleRightStripState(void)
-{
     // Priority management for right strip
     if (charging_signal_received) {
-        // Check for hazard mode during charging mode
         if (hazard_signal_received) {
-            current_mode_pa10 = HAZARD_LIGHT_MODE;
+            current_mode_pa10 = TURN_SIGNAL_MODE;
         } else {
-            current_mode_pa10 = CHARGING_MODE;  // Side strips off in charging mode unless hazard is active
+            current_mode_pa10 = CHARGING_MODE;
         }
-    }
-    else if (hazard_signal_received) {
-        current_mode_pa10 = HAZARD_LIGHT_MODE;
-    }
-    else if (turn_signal_right_received && !hazard_signal_received) {
+    } else if (hazard_signal_received||turn_signal_right_received) {
+//        current_mode_pa10 = HAZARD_LIGHT_MODE;
+//    } else if (turn_signal_right_received && !hazard_signal_received) {
         current_mode_pa10 = TURN_SIGNAL_MODE;
-    }
-    else if (drl_signal_received && !hazard_signal_received && !turn_signal_right_received) {
+    } else if (drl_signal_received && !hazard_signal_received && !turn_signal_right_received) {
         current_mode_pa10 = DRL_MODE;
-    }
-    else {
-        current_mode_pa10 = DRL_MODE;
+    } else {
+        current_mode_pa10 = OFF_MODE;
     }
 
     // State machine for right strip (PA10)
     switch (current_mode_pa10) {
         case CHARGING_MODE:
-            ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);  // Turn off right strip in charging mode
-            is_drl_displayed_pa10 = 0;  // Reset DRL flag
-            break;
-
-        case HAZARD_LIGHT_MODE:
-            frame_pa10 = 0;
-            UpdateHazardBlink(WS28XX_RIGHT_LED_COUNT);
-//            HAL_Delay(HAZARD_BLINK_DELAY);
+            ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);
             is_drl_displayed_pa10 = 0;
             break;
+
+//        case HAZARD_LIGHT_MODE:
+//            if (current_time - last_blink_time_right >= HAZARD_BLINK_DELAY) {
+//                blink_state_right = !blink_state_right; // Toggle blink state
+//                if (blink_state_right)
+//                {
+//                    // Set all LEDs to amber
+//                    for (int i = 0; i < WS28XX_RIGHT_LED_COUNT; i++) {
+//                        WS28XX_SetPixel_RGBW_565(&ws_pa10, i, COLOR_RGB565_AMBER, 255);
+//                    }
+//                    WS28XX_Update(&ws_pa10);
+//                } else
+//                {
+//                    // Reset all LEDs to off
+//                    ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);
+//                }
+//                last_blink_time_right = current_time; // Update last blink timestamp
+//            }
+//            is_drl_displayed_pa10 = 0; // Reset DRL flag
+//            break;
 
         case TURN_SIGNAL_MODE:
-            UpdateWaveEffect(&ws_pa10, frame_pa10, WS28XX_RIGHT_LED_COUNT);
-            frame_pa10 += WAVE_STEP_SIZE;
-            if (frame_pa10 >= WS28XX_RIGHT_LED_COUNT) frame_pa10 = 0;
-            HAL_Delay(WAVE_SPEED);
-            is_drl_displayed_pa10 = 0;
+            if (current_time - last_blink_time_right >= HAZARD_BLINK_DELAY) {
+                blink_state_right = !blink_state_right; // Toggle blink state
+                if (blink_state_right)
+                {
+                    // Set all LEDs to amber
+                    for (int i = 0; i < WS28XX_RIGHT_LED_COUNT; i++) {
+                        WS28XX_SetPixel_RGBW_565(&ws_pa10, i, COLOR_RGB565_AMBER, 255);
+                    }
+                    WS28XX_Update(&ws_pa10);
+                } else
+                {
+                    // Reset all LEDs to off
+                    ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);
+                }
+                last_blink_time_right = current_time; // Update last blink timestamp
+            }
+            is_drl_displayed_pa10 = 0; // Reset DRL flag
             break;
 
         case DRL_MODE:
             frame_pa10 = 0;
             UpdateDRLMode(&ws_pa10, WS28XX_RIGHT_LED_COUNT, &is_drl_displayed_pa10);
+            break;
+
+        case OFF_MODE:
+            frame_pa10 = 0;
+            ResetLEDStrip(&ws_pa10, WS28XX_RIGHT_LED_COUNT);
+            is_drl_displayed_pa10 = 0;
             break;
 
         default:
@@ -566,43 +661,60 @@ void HandleRightStripState(void)
     }
 }
 
-
-void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count)
+void UpdateWaveEffect(WS28XX_HandleTypeDef* ws, int frame, int pixel_count, int direction)
 {
     ResetLEDStrip(ws, pixel_count);
+
     for (int i = 0; i < pixel_count; i++) {
-        if (i >= frame && i < frame + WAVE_PACKET_SIZE) {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_AMBER, 255);
+        int pixel_index = (direction == 1) ? i : (pixel_count - 1 - i); // Adjust index for direction
+        if (pixel_index >= frame && pixel_index < frame + WAVE_PACKET_SIZE) {
+            WS28XX_SetPixel_RGBW_565(ws, pixel_index, COLOR_RGB565_AMBER, 255);
         } else {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_BLACK, 0);
+            WS28XX_SetPixel_RGBW_565(ws, pixel_index, COLOR_RGB565_BLACK, 0);
         }
     }
     WS28XX_Update(ws);
 }
 
-
 void UpdateDRLMode(WS28XX_HandleTypeDef* ws, int pixel_count, int* is_drl_displayed)
 {
+    static uint32_t last_refresh_time = 0;  // Tracks the last refresh time
+    uint32_t current_time = HAL_GetTick(); // Get the current tick count
+
     // Check if DRL mode is already displayed
     if (*is_drl_displayed) {
-        return;  // Avoid redundant refreshes (to prevent flickering)
+        // Refresh the DRL state every 100 ms
+        if (current_time - last_refresh_time >= DRL_REFRESH_TIME) {
+            last_refresh_time = current_time;
+
+            // Reset and update DRL LEDs
+//            ResetLEDStrip(ws, pixel_count);
+            for (int i = 0; i < pixel_count; i++) {
+                WS28XX_SetPixel_RGB_888(ws, i, COLOR_RGB888_WHITE);  // Set all LEDs to full white
+            }
+
+            WS28XX_Update(ws);  // Refresh the strip with the new DRL state
+            HAL_Delay(6);
+            HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+        }
+        return;  // Exit function if DRL is already displayed
+    }else
+    {
+        // If DRL is not displayed, initialize DRL mode
+        ResetLEDStrip(ws, pixel_count);
+        for (int i = 0; i < pixel_count; i++) {
+            WS28XX_SetPixel_RGB_888(ws, i, COLOR_RGB888_WHITE);  // Set all LEDs to full white
+        }
+
+        WS28XX_Update(ws);  // Refresh the strip with the new DRL state
+        HAL_Delay(6);
+        HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+
+        // Mark DRL as displayed
+        *is_drl_displayed = 1;
+        last_refresh_time = current_time;  // Reset refresh timer
     }
-
-    // Reset the LED strip and update to DRL mode
-    ResetLEDStrip(ws, pixel_count);
-
-    for (int i = 0; i < pixel_count; i++) {
-        WS28XX_SetPixel_RGB_888(ws, i, COLOR_RGB888_WHITE);  // Set all LEDs to full white
-    }
-
-    WS28XX_Update(ws);  // Refresh the strip with the new DRL state
-    HAL_Delay(6);
-    HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
-
-    // Mark DRL as displayed
-    *is_drl_displayed = 1;
 }
-
 
 void UpdateHazardBlink(int led_count)
 {
@@ -619,9 +731,9 @@ void UpdateHazardBlink(int led_count)
     }
     blink_on = !blink_on;
     WS28XX_Update(&ws_pa8);
+    HAL_Delay(6);
     WS28XX_Update(&ws_pa10);
 }
-
 
 void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count)
 {
@@ -631,14 +743,13 @@ void ResetLEDStrip(WS28XX_HandleTypeDef* ws, int pixel_count)
     WS28XX_Update(ws);
 }
 
-
 void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
 {
     static int wave_count_middle = 0;               // To track the number of outward-inward wave passes
     static int frame_left = MIDDLE_LED_MID_INDEX;   // Start from the middle (left side)
     static int frame_right = MIDDLE_LED_MID_INDEX;  // Start from the middle (right side)
     static uint8_t wave_direction = 0;              // 0 = outward, 1 = inward
-    static int last_update_time = 0;                // To control update speed and reduce flickering
+    static int last_update_time = 0;                // To control update speed
     static int drl_wave_complete_middle = 0;        // To indicate when DRL transition is complete
     static int sequential_turn_on = 0;              // Counter for sequential turn-on after waves
     int current_time = HAL_GetTick();               // Get the current system time in milliseconds
@@ -648,15 +759,26 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
         if (current_time - last_update_time >= STARTUP_WAVE_SPEED) {
             // Outward wave animation
             if (wave_direction == 0) {
-                ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs for next wave update
-                for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
-                    if (frame_left - i >= 0) {
-                        WS28XX_SetPixel_RGBW_888(ws, frame_left - i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color with RGB 888
+                // Turn off the previous edge LEDs
+                for (int i = 0; i < 4; i++) {
+                    if (frame_left + i < MIDDLE_LED_MID_INDEX) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_left + i, COLOR_RGB888_BLACK, 0);
                     }
-                    if (frame_right + i < WS28XX_MIDDLE_LED_COUNT) {
-                        WS28XX_SetPixel_RGBW_888(ws, frame_right + i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color with RGB 888
+                    if (frame_right - i >= MIDDLE_LED_MID_INDEX) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_right - i, COLOR_RGB888_BLACK, 0);
                     }
                 }
+
+                // Turn on the new edge LEDs
+                for (int i = 0; i < 4; i++) {
+                    if (frame_left - i >= 0) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_left - i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);
+                    }
+                    if (frame_right + i < WS28XX_MIDDLE_LED_COUNT) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_right + i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);
+                    }
+                }
+
                 WS28XX_Update(ws);
                 HAL_Delay(6);
                 HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
@@ -670,15 +792,26 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
             }
             // Inward wave animation
             else if (wave_direction == 1) {
-                ResetLEDStrip(ws, WS28XX_MIDDLE_LED_COUNT);  // Clear LEDs for the next update
-                for (int i = 0; i < WAVE_PACKET_SIZE_MIDDLE; i++) {
-                    if (frame_left + i < MIDDLE_LED_MID_INDEX) {
-                        WS28XX_SetPixel_RGBW_888(ws, frame_left + i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color
+                // Turn off the previous edge LEDs
+                for (int i = 0; i < 4; i++) {
+                    if (frame_left - i >= 0) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_left - i, COLOR_RGB888_BLACK, 0);
                     }
-                    if (frame_right - i >= MIDDLE_LED_MID_INDEX) {
-                        WS28XX_SetPixel_RGBW_888(ws, frame_right - i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);  // Set white color
+                    if (frame_right + i < WS28XX_MIDDLE_LED_COUNT) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_right + i, COLOR_RGB888_BLACK, 0);
                     }
                 }
+
+                // Turn on the new edge LEDs
+                for (int i = 0; i < 4; i++) {
+                    if (frame_left + i < MIDDLE_LED_MID_INDEX) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_left + i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);
+                    }
+                    if (frame_right - i >= MIDDLE_LED_MID_INDEX) {
+                        WS28XX_SetPixel_RGBW_888(ws, frame_right - i, COLOR_RGB888_WHITE, DRL_BRIGHTNESS);
+                    }
+                }
+
                 WS28XX_Update(ws);
                 HAL_Delay(6);
                 HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
@@ -700,8 +833,8 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
     } else if (!drl_wave_complete_middle) {
         if (current_time - last_update_time >= STARTUP_WAVE_SPEED * 2) {  // Slower speed for smooth sequential effect
             // Light up LEDs sequentially from center to edges
-            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX - sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // White
-            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX + sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // White
+            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX - sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
+            WS28XX_SetPixel_RGBW_565(ws, MIDDLE_LED_MID_INDEX + sequential_turn_on, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
 
             WS28XX_Update(ws);
             HAL_Delay(6);
@@ -719,19 +852,19 @@ void UpdateStartupWaveForMiddle(WS28XX_HandleTypeDef* ws)
     } else {
         // Set all LEDs to DRL mode (steady white)
         for (int i = 0; i < WS28XX_MIDDLE_LED_COUNT; i++) {
-            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);  // Full brightness in DRL mode
+            WS28XX_SetPixel_RGBW_565(ws, i, COLOR_RGB565_WHITE, DRL_BRIGHTNESS);
         }
         WS28XX_Update(ws);
         HAL_Delay(6);
         HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
 
         drl_signal_received = 1;  // Signal that DRL mode is active
+        startup_signal_received = 0; // Turn off startup mode after one run
         wave_count_middle = 0;    // Reset wave count for future sequences
         drl_wave_complete_middle = 0;  // Reset DRL completion flag
         sequential_turn_on = 0;   // Reset sequential turn-on counter
     }
 }
-
 
 void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration)
 {
@@ -763,7 +896,6 @@ void BreathingEffect(WS28XX_HandleTypeDef* ws, int duration)
         HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
     }
 }
-
 
 void UpdateSOCIndication(WS28XX_HandleTypeDef* ws, int soc_percentage, int charging_type) {
     static int last_update_time = 0;
@@ -818,18 +950,15 @@ void UpdateSOCIndication(WS28XX_HandleTypeDef* ws, int soc_percentage, int charg
     }
 }
 
-
 void SetGPIOHigh(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin)
 {
     HAL_GPIO_WritePin(GPIOx, GPIO_Pin, GPIO_PIN_SET);
 }
 
-
 void SetGPIOLow(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin)
 {
     HAL_GPIO_WritePin(GPIOx, GPIO_Pin, GPIO_PIN_RESET);
 }
-
 
 void HandleHornState(void)
 {
@@ -850,7 +979,6 @@ void HandleHornState(void)
             break;
     }
 }
-
 
 void HandleHeadlampState(void)
 {
@@ -884,7 +1012,6 @@ void HandleHeadlampState(void)
     }
 }
 
-
 void readHazardSwitch(void)
 {
 	  uint8_t switchedge = DetectEdge(GPIOB, GPIO_PIN_13, debounceDelay);
@@ -912,73 +1039,85 @@ void readHazardSwitch(void)
 	  }
 }
 
+void readSteeringControls(void) {
+    // Read ADC for PA3
+    ADC_Select_CH3();
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 100);
+    adc_val_pa3 = HAL_ADC_GetValue(&hadc1);
+    voltage_pa3 = (adc_val_pa3 * VREF) / 4095.0; // Convert to voltage
+    HAL_ADC_Stop(&hadc1);
 
-void readSteeringControls(void)
-{
-	  ADC_Select_CH3();
-	  HAL_ADC_Start(&hadc1);
-	  HAL_ADC_PollForConversion(&hadc1, 100);
-	  adc_val_pa3 = HAL_ADC_GetValue(&hadc1);
-	  voltage_pa3 = (adc_val_pa3 * VREF) / 4095.0; // Convert to voltage
-	  HAL_ADC_Stop(&hadc1);
+    // Read ADC for PA4
+    ADC_Select_CH4();
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 100);
+    adc_val_pa4 = HAL_ADC_GetValue(&hadc1);
+    voltage_pa4 = (adc_val_pa4 * VREF) / 4095.0; // Convert to voltage
+    HAL_ADC_Stop(&hadc1);
 
-	  ADC_Select_CH4();
-	  HAL_ADC_Start(&hadc1);
-      HAL_ADC_PollForConversion(&hadc1, 100);
-	  adc_val_pa4 = HAL_ADC_GetValue(&hadc1);
-	  voltage_pa4 = (adc_val_pa4 * VREF) / 4095.0; // Convert to voltage
-	  HAL_ADC_Stop(&hadc1);
-
-	  ADC_Select_CH2();
-	  HAL_ADC_Start(&hadc1);
-	  HAL_ADC_PollForConversion(&hadc1, 100);
-	  adc_val_pa2 = HAL_ADC_GetValue(&hadc1);
-	  voltage_pa2 = (adc_val_pa2 * VREF) / 4095.0; // Convert to voltage
-	  HAL_ADC_Stop(&hadc1);
-
-	      if (voltage_pa3 < 2.6 && voltage_pa3 > 2.3){
-	    	  turn_signal_left_received = 0; /// off left indicator
-	  		  turn_signal_right_received = 1; /// on right indicator
-	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);  // on right indicator sending to rear
-	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // off left indicator sending to rear
+    // Read ADC for PA2
+    ADC_Select_CH2();
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 100);
+    adc_val_pa2 = HAL_ADC_GetValue(&hadc1);
+    voltage_pa2 = (adc_val_pa2 * VREF) / 4095.0; // Convert to voltage
+    HAL_ADC_Stop(&hadc1);
 
 
-	      } else if (voltage_pa3 < 1.7 && voltage_pa3 > 1.4){
-	  		  turn_signal_right_received = 0; /// off right indicator
-	  		  turn_signal_left_received = 1; /// on left indicator
-	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);  // off right indicator sending to rear
-	  		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // on left indicator sending to rear
-	      }else{
-	    	  turn_signal_right_received = 0; /// off right indicator
-	    	  turn_signal_left_received = 0; /// off left indicator
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);  // off right indicator sending to rear
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // off left indicator sending to rear
-	  	  }
+    if (voltage_pa3 < 2.6 && voltage_pa3 > 2.3) {
+        turn_signal_left_raw = 0;
+        turn_signal_right_raw = 1;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+    } else if (voltage_pa3 < 1.7 && voltage_pa3 > 1.4) {
+        turn_signal_right_raw = 0;
+        turn_signal_left_raw = 1;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+    } else {
+        turn_signal_right_raw = 0;
+        turn_signal_left_raw = 0;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+    }
 
-	      if (voltage_pa4 < 2.6 && voltage_pa4 > 2.3){
-	    	  headlamp_high_beam_signal_received = 1; /// turn on highbeam
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
+    if (voltage_pa4 < 2.6 && voltage_pa4 > 2.3) {
+        headlamp_high_raw = 1;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+    } else if (voltage_pa4 < 1.7 && voltage_pa4 > 1.4) {
+        headlamp_high_raw = 1;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+    } else {
+        headlamp_high_raw = 0;
+    }
 
-	      } else if (voltage_pa4 < 1.7 && voltage_pa4 > 1.4){
-	    	  headlamp_high_beam_signal_received = 1; /// turn on highbeam
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
-	      }else{
-	    	  headlamp_high_beam_signal_received = 0; /// turn off flasher
-	  	  }
+    if (voltage_pa2 < 2.4 && voltage_pa2 > 1.5) {
+        headlamp_low_raw = 0;
+//        drl_signal_received = 1;
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+    } else if (voltage_pa2 < 3.0 && voltage_pa2 > 2.6) {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+        headlamp_low_raw = 1;
+//        drl_signal_received = 1;
+    } else {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
+        headlamp_low_raw = 0;
+//        drl_signal_received = 0;
+    }
 
-	      if (voltage_pa2 < 2.2 && voltage_pa2 > 1.8){
-	    	  headlamp_low_beam_signal_received = 0; // turn off low beam
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
-	      } else if (voltage_pa2 < 2.95 && voltage_pa2 > 2.6){
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET); // Sending position ON to rear side
-	       	  headlamp_low_beam_signal_received = 1; // turn on low beam
-	      }else{
-	    	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET); // Sending position OFF to rear side
-	       	  headlamp_low_beam_signal_received = 0; // turn off low beam
-	      }
+    // Debounce raw values to update stable flags
+    DebounceFlag(&turn_signal_left_flag, turn_signal_left_raw);
+    DebounceFlag(&turn_signal_right_flag, turn_signal_right_raw);
+    DebounceFlag(&headlamp_low_beam_flag, headlamp_low_raw);
+    DebounceFlag(&headlamp_high_beam_flag, headlamp_high_raw);
 
+    // Update flags with stable values
+    turn_signal_left_received = turn_signal_left_flag.stable_value;
+    turn_signal_right_received = turn_signal_right_flag.stable_value;
+    headlamp_low_beam_signal_received = headlamp_low_beam_flag.stable_value;
+    headlamp_high_beam_signal_received = headlamp_high_beam_flag.stable_value;
 }
-
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
@@ -986,7 +1125,6 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_3);
 //	HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2); //We don't stop this PWM as this LED strip is too long and doesn't get update fast enough
 }
-
 
 void ADC_Select_CH3(void)
 {
@@ -1002,7 +1140,6 @@ void ADC_Select_CH3(void)
 	  }
 }
 
-
 void ADC_Select_CH4(void)
 {
 	ADC_ChannelConfTypeDef sConfig = {0};
@@ -1016,7 +1153,6 @@ void ADC_Select_CH4(void)
 	    Error_Handler();
 	  }
 }
-
 
 void ADC_Select_CH2(void)
 {
@@ -1032,81 +1168,60 @@ void ADC_Select_CH2(void)
 	  }
 }
 
+//void ADC_Select_CH5(void)
+//{
+//	ADC_ChannelConfTypeDef sConfig = {0};
+//	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+//	  */
+//	  sConfig.Channel = ADC_CHANNEL_5;
+//	  sConfig.Rank = 1;
+//	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+//	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+//	  {
+//	    Error_Handler();
+//	  }
+//}
+//
+//void ADC_Select_CH7(void)
+//{
+//	ADC_ChannelConfTypeDef sConfig = {0};
+//	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+//	  */
+//	  sConfig.Channel = ADC_CHANNEL_7;
+//	  sConfig.Rank = 1;
+//	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+//	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+//	  {
+//	    Error_Handler();
+//	  }
+//}
 
-void ADC_Select_CH5(void)
-{
-	ADC_ChannelConfTypeDef sConfig = {0};
-	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-	  */
-	  sConfig.Channel = ADC_CHANNEL_5;
-	  sConfig.Rank = 1;
-	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
-	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-	  {
-	    Error_Handler();
-	  }
-}
+void readBrakeSwitch(void) {
+    DebounceInput(GPIOB, GPIO_PIN_15, &brake_state);
 
-
-void ADC_Select_CH7(void)
-{
-	ADC_ChannelConfTypeDef sConfig = {0};
-	  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-	  */
-	  sConfig.Channel = ADC_CHANNEL_7;
-	  sConfig.Rank = 1;
-	  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
-	  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-	  {
-	    Error_Handler();
-	  }
-}
-
-
-void readBrakeSwitch(void)
-{
-    // Use debounce logic with a delay of 50 ms
-//    uint8_t brake_pressed = DebouncePin(GPIOB, GPIO_PIN_15, 50);
-
-    if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15) == GPIO_PIN_RESET) // Active Low: Brake is pressed
-//    if (!brake_pressed) // Active Low: Brake is pressed
-    {
+    if (brake_state.stable_value == GPIO_PIN_RESET) { // Active Low: Brake is pressed
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET); // Set PB4
-    }
-    else
-    {
+    } else {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET); // Reset PB4
     }
 }
 
+void readHorn(void) {
+    DebounceInput(GPIOB, GPIO_PIN_12, &horn_state);
 
-void readHorn(void)
-{
-    // Use debounce logic with a delay of 50 ms
-//    uint8_t horn_active = DebouncePin(GPIOB, GPIO_PIN_12, 50);
-
-    if (HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_12) == GPIO_PIN_RESET) // Active Low: Horn is pressed
-//    if (!horn_active) // Active Low: Horn is pressed
-    {
+    if (horn_state.stable_value == GPIO_PIN_RESET) { // Active Low: Horn is pressed
         horn_signal_received = 1; // Set horn signal flag
-    }
-    else
-    {
+    } else {
         horn_signal_received = 0; // Reset horn signal flag
     }
 }
 
+void readReverseGear(void) {
+    DebounceInput(GPIOA, GPIO_PIN_12, &reverse_state);
 
-void readReverseGear(void)
-{
-    uint8_t reverse_active = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_12); // No debounce needed directpin
-
-    if (reverse_active == GPIO_PIN_SET) // Active High: Reverse is engaged
-    {
+    if (reverse_state.stable_value == GPIO_PIN_SET) { // Active High: Reverse is engaged
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET); // Set PB6
-    }
-    else
-    {
+    } else {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // Reset PB6
     }
 }
@@ -1136,7 +1251,6 @@ int DebounceHazardPin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_
 
 }
 
-
 uint8_t DetectEdge(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_delay)
 {
 	static int prev_pin_state = 0;
@@ -1158,7 +1272,46 @@ uint8_t DetectEdge(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, uint32_t debounce_del
 	}
 }
 
-#ifdef TEST_MODE
+void DebounceInput(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin, DebounceState* state)
+{
+    uint8_t current_value = HAL_GPIO_ReadPin(GPIOx, GPIO_Pin);
+    uint32_t current_time = HAL_GetTick();
+
+    if (current_value != state->last_value) {
+        state->last_debounce_time = current_time; // Reset debounce timer
+        state->sample_count = 0;                 // Reset sample count
+    }
+
+    if ((current_time - state->last_debounce_time) >= DEBOUNCE_DELAY) {
+        if (state->sample_count >= DEBOUNCE_SAMPLES) {
+            state->stable_value = current_value; // Update stable value
+        } else {
+            state->sample_count++;
+        }
+    }
+
+    state->last_value = current_value; // Update last value
+}
+
+void DebounceFlag(DebounceState* flag_state, uint8_t raw_value)
+{
+    uint32_t current_time = HAL_GetTick();
+
+    if (raw_value != flag_state->last_value) {
+        flag_state->last_debounce_time = current_time; // Reset debounce timer
+        flag_state->sample_count = 0;                 // Reset sample count
+    }
+
+    if ((current_time - flag_state->last_debounce_time) >= 50) { // 50ms debounce delay
+        if (flag_state->sample_count >= 5) { // 5 consistent samples required
+            flag_state->stable_value = raw_value; // Update stable value
+        } else {
+            flag_state->sample_count++;
+        }
+    }
+
+    flag_state->last_value = raw_value; // Update last observed value
+}
 
 #ifdef TEST_MODE
 void Handle_TestMode(void)
@@ -1212,8 +1365,6 @@ void Handle_TestMode(void)
         last_state_change_time = current_time;
     }
 }
-#endif
-
 #endif
 
 //void UART_Init(void)
