@@ -71,7 +71,7 @@ enum pinstate { no_change = 0, rising_edge = 1, falling_edge = 2};
 /* USER CODE BEGIN PD */
 #define Clock_Frequency 36000 //KHz
 #define WS28XX_LEFT_LED_COUNT 25
-#define WS28XX_MIDDLE_LED_COUNT 150
+#define WS28XX_MIDDLE_LED_COUNT 152
 #define WS28XX_RIGHT_LED_COUNT 25
 
 #define WAVE_PACKET_SIZE 9
