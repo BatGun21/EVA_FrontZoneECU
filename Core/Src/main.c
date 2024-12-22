@@ -157,11 +157,13 @@ static DebounceState turn_signal_left_flag = {0};
 static DebounceState turn_signal_right_flag = {0};
 static DebounceState headlamp_low_beam_flag = {0};
 static DebounceState headlamp_high_beam_flag = {0};
+static DebounceState drl_flag = {0};
 
 uint8_t turn_signal_left_raw = 0;
 uint8_t turn_signal_right_raw = 0;
 uint8_t headlamp_low_raw = 0;
 uint8_t headlamp_high_raw = 0;
+uint8_t drl_signal_received_raw = 0;
 
 #ifdef TEST_MODE
 /* Variables for Test Mode */
@@ -1094,16 +1096,16 @@ void readSteeringControls(void) {
 
     if (voltage_pa2 < 2.4 && voltage_pa2 > 1.5) {
         headlamp_low_raw = 0;
-//        drl_signal_received = 1;
+        drl_signal_received_raw = 1;
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
     } else if (voltage_pa2 < 3.0 && voltage_pa2 > 2.6) {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
         headlamp_low_raw = 1;
-//        drl_signal_received = 1;
+        drl_signal_received_raw = 1;
     } else {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
         headlamp_low_raw = 0;
-//        drl_signal_received = 0;
+        drl_signal_received_raw = 0;
     }
 
     // Debounce raw values to update stable flags
@@ -1111,12 +1113,14 @@ void readSteeringControls(void) {
     DebounceFlag(&turn_signal_right_flag, turn_signal_right_raw);
     DebounceFlag(&headlamp_low_beam_flag, headlamp_low_raw);
     DebounceFlag(&headlamp_high_beam_flag, headlamp_high_raw);
+    DebounceFlag(&drl_flag, drl_signal_received_raw);
 
     // Update flags with stable values
     turn_signal_left_received = turn_signal_left_flag.stable_value;
     turn_signal_right_received = turn_signal_right_flag.stable_value;
     headlamp_low_beam_signal_received = headlamp_low_beam_flag.stable_value;
     headlamp_high_beam_signal_received = headlamp_high_beam_flag.stable_value;
+    drl_signal_received = drl_flag.stable_value;
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
